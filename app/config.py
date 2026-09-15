@@ -40,6 +40,11 @@ class GatewaySettings(BaseSettings):
     # --- Cleanup ---
     queue_cleanup_interval_seconds: float = 300.0  # 5 minutes
 
+    # --- Keep-alive (Prevents idle spin-down on Render / free cloud hosts) ---
+    self_ping_enabled: bool = True
+    self_ping_interval_seconds: float = 600.0  # 10 minutes (Render sleeps after 15m)
+    public_url: str | None = None
+
     # --- Logging ---
     log_level: str = "INFO"
 

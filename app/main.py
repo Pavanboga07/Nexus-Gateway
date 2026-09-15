@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+
+import httpx
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import (
@@ -107,18 +110,28 @@ async def lifespan(app: FastAPI):
     # Mark all agents offline on startup (clean stale state)
     await _presence.mark_all_offline_on_startup()
 
-    # --- Background cleanup task ---
+    # --- Background tasks ---
     cleanup_task = asyncio.create_task(
         _periodic_cleanup(settings.queue_cleanup_interval_seconds)
     )
+
+    self_ping_task: asyncio.Task | None = None
+    if settings.self_ping_enabled:
+        self_ping_task = asyncio.create_task(
+            _self_ping_loop(settings.self_ping_interval_seconds)
+        )
 
     logger.info("Nexus Gateway ready.")
     yield
 
     # --- Shutdown ---
     cleanup_task.cancel()
+    if self_ping_task:
+        self_ping_task.cancel()
     try:
         await cleanup_task
+        if self_ping_task:
+            await self_ping_task
     except asyncio.CancelledError:
         pass
 
@@ -138,6 +151,39 @@ async def _periodic_cleanup(interval_seconds: float) -> None:
             break
         except Exception as exc:
             logger.error("Queue cleanup error: %s", exc)
+
+
+async def _self_ping_loop(interval_seconds: float) -> None:
+    """Periodically ping the gateway's public URL to prevent idle spin-down on Render / free cloud hosts."""
+    # Wait 60 seconds after startup before initial ping
+    await asyncio.sleep(60.0)
+    while True:
+        try:
+            settings = get_settings()
+            # Render automatically sets RENDER_EXTERNAL_URL
+            external_url = os.environ.get("RENDER_EXTERNAL_URL") or settings.public_url
+            if external_url:
+                target_url = f"{external_url.rstrip('/')}/health"
+                try:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        resp = await client.get(target_url)
+                        logger.info(
+                            "Keep-alive self-ping to %s: HTTP %d (Render idle timer reset)",
+                            target_url,
+                            resp.status_code,
+                        )
+                except Exception as req_err:
+                    logger.warning("Keep-alive self-ping failed: %s", req_err)
+            else:
+                logger.debug(
+                    "Keep-alive self-ping skipped: RENDER_EXTERNAL_URL or GATEWAY_PUBLIC_URL not configured"
+                )
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Error in keep-alive self-ping loop: %s", exc)
+            await asyncio.sleep(interval_seconds)
 
 
 # --- FastAPI app ---
