@@ -1,0 +1,35 @@
+services:
+  gateway_db:
+    image: postgres:16-alpine
+    container_name: nexus_gateway_postgres
+    environment:
+      POSTGRES_USER: nexus_gateway
+      POSTGRES_PASSWORD: gateway_secret
+      POSTGRES_DB: nexus_gateway
+    ports:
+      - "5434:5432"
+    volumes:
+      - gateway_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus_gateway -d nexus_gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build: .
+    container_name: nexus_gateway
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      GATEWAY_HOST: "0.0.0.0"
+      GATEWAY_PORT: "9000"
+      GATEWAY_DATABASE_URL: "postgresql+asyncpg://nexus_gateway:gateway_secret@gateway_db:5432/nexus_gateway"
+      GATEWAY_LOG_LEVEL: "INFO"
+    depends_on:
+      gateway_db:
+        condition: service_healthy
+
+volumes:
+  gateway_pgdata:

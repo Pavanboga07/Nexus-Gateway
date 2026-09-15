@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: nexus-gateway
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: GATEWAY_HOST
+        value: "0.0.0.0"
+      - key: GATEWAY_LOG_LEVEL
+        value: "INFO"
+      - key: GATEWAY_DATABASE_URL
+        sync: false
