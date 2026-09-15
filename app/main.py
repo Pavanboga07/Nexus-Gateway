@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -197,6 +198,109 @@ app = FastAPI(
 
 
 # --- REST endpoints ---
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root_status() -> str:
+    """Landing status page for browsers and monitoring."""
+    settings = get_settings()
+    count = _connection_manager.active_count if _connection_manager else 0
+    ext_url = os.environ.get("RENDER_EXTERNAL_URL") or "http://localhost:9000"
+    ws_url = ext_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Nexus Gateway</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #09090b;
+            color: #fafafa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }}
+        .card {{
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 12px;
+            padding: 32px;
+            max-width: 520px;
+            width: 100%;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+        }}
+        .badge {{
+            display: inline-flex;
+            align-items: center;
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            padding: 4px 12px;
+            border-radius: 9999px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }}
+        .dot {{
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 50%;
+            margin-right: 8px;
+        }}
+        h1 {{ font-size: 22px; margin: 0 0 8px 0; font-weight: 700; }}
+        p {{ color: #a1a1aa; margin: 0 0 20px 0; font-size: 14px; line-height: 1.5; }}
+        .label {{ font-size: 12px; color: #71717a; margin-bottom: 6px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .endpoint {{
+            background: #09090b;
+            border: 1px solid #27272a;
+            border-radius: 8px;
+            padding: 12px 14px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 13px;
+            color: #38bdf8;
+            word-break: break-all;
+            margin-bottom: 20px;
+        }}
+        .stats {{
+            display: flex;
+            justify-content: space-between;
+            border-top: 1px solid #27272a;
+            padding-top: 16px;
+            font-size: 13px;
+            color: #71717a;
+        }}
+        .stat-val {{ color: #fafafa; font-weight: 600; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge"><span class="dot"></span> Online & Operational</div>
+        <h1>Nexus Gateway</h1>
+        <p>A standalone WebSocket relay for secure, peer-to-peer Agent-to-Agent (A2A) communication across NAT boundaries.</p>
+        
+        <div class="label">WebSocket Endpoint</div>
+        <div class="endpoint">{ws_url}</div>
+
+        <div class="stats">
+            <div>Status: <span class="stat-val">Healthy</span></div>
+            <div>Connections: <span class="stat-val">{count}</span></div>
+            <div>Version: <span class="stat-val">0.1.0</span></div>
+        </div>
+    </div>
+</body>
+</html>"""
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    return Response(status_code=204)
 
 
 @app.get("/health")
