@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -329,6 +329,7 @@ async def list_agents() -> dict:
             {
                 "agent_id": agent.agent_id,
                 "display_name": agent.display_name,
+                "handle": f"@{agent.handle}" if getattr(agent, "handle", None) else None,
                 "is_online": agent.is_online,
                 "last_seen_at": (
                     agent.last_seen_at.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -338,6 +339,112 @@ async def list_agents() -> dict:
             }
         )
     return {"agents": agents, "total": len(agents)}
+
+
+@app.get("/agents/search")
+async def search_agents(q: str = "") -> dict:
+    """Public agent directory search (safe public metadata only).
+    
+    Returns strictly public metadata:
+    - agent_id
+    - display_name
+    - handle (@handle)
+    - public_key
+    - is_online
+    - capabilities
+    - last_seen_at
+
+    Does NOT return: memory, email, private contact info, private endpoints, personal data.
+    """
+    if _repository is None or not q.strip():
+        return {"agents": [], "total": 0}
+
+    results = await _repository.search_agents(q.strip(), limit=10)
+    agents = []
+    for agent in results:
+        online = _connection_manager.is_online(agent.agent_id) if _connection_manager else agent.is_online
+        agents.append(
+            {
+                "agent_id": agent.agent_id,
+                "display_name": agent.display_name,
+                "handle": f"@{agent.handle}" if agent.handle else None,
+                "public_key": agent.public_key,
+                "is_online": online,
+                "capabilities": ["a2a", "scheduling", "task_delegation"],
+                "agent_card": agent.agent_card,
+                "last_seen_at": (
+                    agent.last_seen_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if agent.last_seen_at
+                    else None
+                ),
+            }
+        )
+    return {"agents": agents, "total": len(agents)}
+
+
+@app.get("/agents/handle/{handle}")
+async def get_agent_by_handle(handle: str) -> dict:
+    """Exact lookup of a registered agent by public handle (e.g. rahul or @rahul)."""
+    if _repository is None:
+        raise HTTPException(status_code=503, detail="Repository unavailable")
+    agent = await _repository.get_by_handle(handle)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent handle not found")
+    online = _connection_manager.is_online(agent.agent_id) if _connection_manager else False
+    return {
+        "agent_id": agent.agent_id,
+        "display_name": agent.display_name,
+        "handle": f"@{agent.handle}" if agent.handle else None,
+        "public_key": agent.public_key,
+        "is_online": online,
+        "agent_card": agent.agent_card,
+        "last_seen_at": agent.last_seen_at.strftime("%Y-%m-%dT%H:%M:%SZ") if agent.last_seen_at else None,
+    }
+
+
+@app.get("/agents/{agent_id}")
+async def get_agent_by_id(agent_id: str) -> dict:
+    """Exact authoritative lookup of an agent by canonical Agent ID."""
+    if _repository is None:
+        raise HTTPException(status_code=503, detail="Repository unavailable")
+    agent = await _repository.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    online = _connection_manager.is_online(agent.agent_id) if _connection_manager else False
+    return {
+        "agent_id": agent.agent_id,
+        "display_name": agent.display_name,
+        "handle": f"@{agent.handle}" if agent.handle else None,
+        "public_key": agent.public_key,
+        "is_online": online,
+        "agent_card": agent.agent_card,
+        "last_seen_at": agent.last_seen_at.strftime("%Y-%m-%dT%H:%M:%SZ") if agent.last_seen_at else None,
+    }
+
+
+@app.get("/agents/{agent_id}/card")
+async def get_agent_card(agent_id: str) -> dict:
+    """Retrieve the public signed Agent Card for a registered agent."""
+    if _repository is None:
+        raise HTTPException(status_code=503, detail="Repository unavailable")
+    agent = await _repository.get_agent(agent_id)
+    if not agent or not agent.agent_card:
+        raise HTTPException(status_code=404, detail="Agent card not found")
+    return agent.agent_card
+
+
+@app.get("/agents/{agent_id}/presence")
+async def get_agent_presence(agent_id: str) -> dict:
+    """Check online/offline presence and last-seen status."""
+    if _repository is None:
+        raise HTTPException(status_code=503, detail="Repository unavailable")
+    online = _connection_manager.is_online(agent_id) if _connection_manager else False
+    last_seen = await _presence.get_last_seen_iso(agent_id) if _presence else None
+    return {
+        "agent_id": agent_id,
+        "online": online,
+        "last_seen": last_seen,
+    }
 
 
 # --- WebSocket endpoint ---
@@ -393,6 +500,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         agent_id=agent_id,
         public_key=authed.public_key,
         display_name=authed.display_name,
+        handle=authed.handle,
+        agent_card=authed.agent_card,
     )
 
     # --- Flush offline queue ---

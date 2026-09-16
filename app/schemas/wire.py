@@ -56,6 +56,8 @@ class AuthResponse(BaseModel):
     public_key: str
     signature: str
     display_name: Optional[str] = None
+    handle: Optional[str] = None
+    agent_card: Optional[dict[str, Any]] = None
 
 
 class RelayEnvelope(BaseModel):

@@ -23,6 +23,7 @@ class RegisteredAgent(Base):
     agent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     public_key: Mapped[str] = mapped_column(String(128), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    handle: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), nullable=False
     )
@@ -30,6 +31,7 @@ class RegisteredAgent(Base):
         DateTime(timezone=True), default=func.now(), nullable=False
     )
     is_online: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    agent_card: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class QueuedMessage(Base):

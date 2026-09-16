@@ -31,12 +31,16 @@ class PresenceTracker:
         agent_id: str,
         public_key: str,
         display_name: str | None = None,
+        handle: str | None = None,
+        agent_card: dict[str, Any] | None = None,
     ) -> None:
         """Record that an agent has connected and authenticated."""
         await self._repo.register_agent(
             agent_id=agent_id,
             public_key=public_key,
             display_name=display_name,
+            handle=handle,
+            agent_card=agent_card,
         )
         await self._repo.set_online(agent_id, online=True)
         logger.info("Presence: %s is now ONLINE", agent_id)

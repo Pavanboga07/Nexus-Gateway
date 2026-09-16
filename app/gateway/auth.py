@@ -45,6 +45,8 @@ class AuthenticatedAgent:
     agent_id: str
     public_key: str  # base64 raw Ed25519 public key
     display_name: str | None
+    handle: str | None = None
+    agent_card: dict[str, Any] | None = None
 
 
 class AuthenticationError(Exception):
@@ -128,6 +130,8 @@ async def authenticate_websocket(ws: WebSocket) -> AuthenticatedAgent:
         agent_id=response.agent_id,
         public_key=response.public_key,
         display_name=response.display_name,
+        handle=response.handle,
+        agent_card=response.agent_card,
     )
 
 

@@ -25,7 +25,12 @@ class GatewayRepository:
         self._session_factory = session_factory
 
     async def register_agent(
-        self, agent_id: str, public_key: str, display_name: str | None = None
+        self,
+        agent_id: str,
+        public_key: str,
+        display_name: str | None = None,
+        handle: str | None = None,
+        agent_card: dict[str, Any] | None = None,
     ) -> RegisteredAgent:
         """
         Insert or update an agent record.
@@ -34,24 +39,38 @@ class GatewayRepository:
             agent_id: The unique ID of the agent.
             public_key: The public key of the agent.
             display_name: The display name of the agent.
+            handle: Optional unique public handle (e.g. @rahul).
+            agent_card: Optional signed public agent card.
 
         Returns:
             The registered agent record.
         """
+        clean_handle = handle.lower().lstrip("@") if handle else None
+        if not clean_handle and display_name:
+            clean_handle = display_name.lower().replace(" ", "")[:32]
+
         async with self._session_factory() as session:
             stmt = insert(RegisteredAgent).values(
                 agent_id=agent_id,
                 public_key=public_key,
                 display_name=display_name,
+                handle=clean_handle,
+                agent_card=agent_card,
                 last_seen_at=func.now(),
             )
+            set_dict = {
+                "public_key": stmt.excluded.public_key,
+                "display_name": stmt.excluded.display_name,
+                "last_seen_at": stmt.excluded.last_seen_at,
+            }
+            if clean_handle:
+                set_dict["handle"] = clean_handle
+            if agent_card:
+                set_dict["agent_card"] = agent_card
+
             stmt = stmt.on_conflict_do_update(
                 index_elements=["agent_id"],
-                set_={
-                    "public_key": stmt.excluded.public_key,
-                    "display_name": stmt.excluded.display_name,
-                    "last_seen_at": stmt.excluded.last_seen_at,
-                },
+                set_=set_dict,
             ).returning(RegisteredAgent)
             
             result = await session.execute(stmt)
@@ -59,19 +78,39 @@ class GatewayRepository:
             await session.commit()
             return agent
 
+    async def search_agents(self, query: str, limit: int = 10) -> list[RegisteredAgent]:
+        """Search registered agents by display name, handle, or agent_id."""
+        clean_q = query.strip().lower()
+        if clean_q.startswith("@"):
+            clean_q = clean_q[1:]
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(RegisteredAgent)
+                .where(
+                    (func.lower(RegisteredAgent.display_name).contains(clean_q))
+                    | (func.lower(RegisteredAgent.handle) == clean_q)
+                    | (func.lower(RegisteredAgent.agent_id) == clean_q)
+                )
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
     async def get_agent(self, agent_id: str) -> RegisteredAgent | None:
-        """
-        Fetch an agent by agent_id.
-
-        Args:
-            agent_id: The unique ID of the agent.
-
-        Returns:
-            The registered agent if found, else None.
-        """
+        """Fetch an agent by agent_id."""
         async with self._session_factory() as session:
             result = await session.execute(
                 select(RegisteredAgent).where(RegisteredAgent.agent_id == agent_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_by_handle(self, handle: str) -> RegisteredAgent | None:
+        """Fetch an agent by unique handle."""
+        clean_handle = handle.strip().lower().lstrip("@")
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(RegisteredAgent).where(func.lower(RegisteredAgent.handle) == clean_handle)
             )
             return result.scalar_one_or_none()
 
