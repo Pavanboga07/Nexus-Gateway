@@ -13,7 +13,13 @@ from pydantic_settings import BaseSettings
 class GatewaySettings(BaseSettings):
     """Gateway-specific configuration."""
 
-    model_config = {"env_prefix": "GATEWAY_", "case_sensitive": False}
+    model_config = {
+        "env_prefix": "GATEWAY_",
+        "case_sensitive": False,
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     # --- Networking ---
     host: str = "0.0.0.0"
