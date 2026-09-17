@@ -14,8 +14,9 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -35,6 +36,7 @@ from app.gateway.auth import (
     reject_websocket,
 )
 from app.gateway.connection import ConnectionManager
+from app.gateway.federation import FederatedDirectory
 from app.gateway.presence import PresenceTracker
 from app.gateway.queue import OfflineQueue
 from app.gateway.router import MessageRouter
@@ -46,12 +48,13 @@ from app.schemas.wire import (
     PresenceResult,
     RelayEnvelope,
 )
-from app.storage.models import Base
-from app.storage.repository import GatewayRepository
+from app.storage.repository import GatewayRepository, HandleConflictError
+from app.storage.schema import ensure_schema
 
 logger = logging.getLogger(__name__)
 
 # --- Application state (set during lifespan) ---
+_federation: FederatedDirectory | None = None
 _connection_manager: ConnectionManager | None = None
 _repository: GatewayRepository | None = None
 _router: MessageRouter | None = None
@@ -62,7 +65,7 @@ _queue: OfflineQueue | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: initialize DB, services, cleanup task."""
-    global _connection_manager, _repository, _router, _presence, _queue
+    global _connection_manager, _repository, _router, _presence, _queue, _federation
 
     settings = get_settings()
 
@@ -84,10 +87,15 @@ async def lifespan(app: FastAPI):
         engine, class_=AsyncSession, expire_on_commit=False
     )
 
-    # Create tables if they don't exist
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables ensured.")
+    # Schema is owned by migrations (see app/storage/schema.py). This replaces
+    # an unconditional create_all() that silently diverged from the migration
+    # history and could not express alterations such as the partial unique
+    # index that handle arbitration depends on.
+    await ensure_schema(
+        engine,
+        mode=settings.schema_mode,
+        database_url=settings.database_url,
+    )
 
     # --- Services ---
     _connection_manager = ConnectionManager(
@@ -106,7 +114,19 @@ async def lifespan(app: FastAPI):
         connection_manager=_connection_manager,
         queue=_queue,
         repository=_repository,
+        replica_id=_queue.replica_id,
     )
+    # Federation: peer gateways to consult on a local directory miss (M9).
+    # Off unless configured - depending on another deployment's availability
+    # should be a deliberate choice.
+    _federation = FederatedDirectory()
+    if _federation.enabled:
+        logger.info("Gateway federation enabled: peers=%s", _federation.peers)
+    else:
+        logger.info(
+            "Gateway federation disabled (set GATEWAY_PEER_LOOKUP_ENABLED=true "
+            "and GATEWAY_PEER_URLS to enable cross-gateway discovery)"
+        )
 
     # Mark all agents offline on startup (clean stale state)
     await _presence.mark_all_offline_on_startup()
@@ -116,25 +136,39 @@ async def lifespan(app: FastAPI):
         _periodic_cleanup(settings.queue_cleanup_interval_seconds)
     )
 
+    # Re-delivery sweep: flushes pending messages for agents connected to THIS
+    # replica. Required for correctness with more than one replica, because a
+    # message may be queued while the recipient is attached elsewhere - and the
+    # connect-time flush only runs on the replica that received the connection.
+    redelivery_task = asyncio.create_task(
+        _periodic_redelivery(settings.redelivery_interval_seconds)
+    )
+
     self_ping_task: asyncio.Task | None = None
     if settings.self_ping_enabled:
         self_ping_task = asyncio.create_task(
             _self_ping_loop(settings.self_ping_interval_seconds)
         )
 
-    logger.info("Nexus Gateway ready.")
+    logger.info(
+        "Nexus Gateway ready (schema_mode=%s, replica=%s).",
+        settings.schema_mode,
+        _queue.replica_id if _queue else "n/a",
+    )
     yield
 
     # --- Shutdown ---
     cleanup_task.cancel()
+    redelivery_task.cancel()
     if self_ping_task:
         self_ping_task.cancel()
-    try:
-        await cleanup_task
-        if self_ping_task:
-            await self_ping_task
-    except asyncio.CancelledError:
-        pass
+    for task in (cleanup_task, redelivery_task, self_ping_task):
+        if task is None:
+            continue
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     await _connection_manager.disconnect_all()
     await engine.dispose()
@@ -142,49 +176,136 @@ async def lifespan(app: FastAPI):
 
 
 async def _periodic_cleanup(interval_seconds: float) -> None:
-    """Periodically clean up expired queued messages."""
+    """Periodically dead-letter then drop expired queued messages."""
     while True:
         try:
             await asyncio.sleep(interval_seconds)
             if _queue is not None:
                 await _queue.cleanup_expired()
+            if _repository is not None:
+                cutoff = datetime.now(timezone.utc) - timedelta(
+                    seconds=get_settings().dedup_retention_seconds
+                )
+                pruned = await _repository.prune_processed_relays(older_than=cutoff)
+                if pruned:
+                    logger.debug("Pruned %d dedup record(s)", pruned)
         except asyncio.CancelledError:
             break
         except Exception as exc:
             logger.error("Queue cleanup error: %s", exc)
 
 
-async def _self_ping_loop(interval_seconds: float) -> None:
-    """Periodically ping the gateway's public URL to prevent idle spin-down on Render / free cloud hosts."""
-    # Wait 60 seconds after startup before initial ping
-    await asyncio.sleep(60.0)
+async def _periodic_redelivery(interval_seconds: float) -> None:
+    """Periodically flush pending messages to locally-connected agents."""
     while True:
         try:
-            settings = get_settings()
-            # Render automatically sets RENDER_EXTERNAL_URL
-            external_url = os.environ.get("RENDER_EXTERNAL_URL") or settings.public_url
-            if external_url:
-                target_url = f"{external_url.rstrip('/')}/health"
-                try:
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        resp = await client.get(target_url)
-                        logger.info(
-                            "Keep-alive self-ping to %s: HTTP %d (Render idle timer reset)",
-                            target_url,
-                            resp.status_code,
-                        )
-                except Exception as req_err:
-                    logger.warning("Keep-alive self-ping failed: %s", req_err)
-            else:
-                logger.debug(
-                    "Keep-alive self-ping skipped: RENDER_EXTERNAL_URL or GATEWAY_PUBLIC_URL not configured"
-                )
             await asyncio.sleep(interval_seconds)
+            if _queue is not None:
+                await _queue.redeliver_pending()
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.error("Error in keep-alive self-ping loop: %s", exc)
+            logger.error("Re-delivery sweep error: %s", exc)
+
+
+async def _self_ping_loop(interval_seconds: float) -> None:
+    """Keep-alive ping to the gateway's own public URL.
+
+    **This is an opt-in workaround, not a feature.** It exists for one hosting
+    behaviour: a free tier that spins an idle container down, which silently
+    drops every connected agent. `GATEWAY_SELF_PING_ENABLED` is therefore False
+    by default (`L2`).
+
+    Two properties matter, and both were wrong before:
+
+    * **The target is validated, not trusted.** The URL comes from
+      `RENDER_EXTERNAL_URL` or `GATEWAY_PUBLIC_URL`; pinging it unvalidated turns
+      "an operator typo" or "a tampered environment" into a server-side request
+      forgery primitive that this process fires every ten minutes. A non-HTTPS
+      URL, or one pointing at a loopback/private/link-local address, is refused.
+    * **It says so when it cannot work.** Without a URL the loop logs once at
+      startup and exits, instead of sleeping forever on a `debug` line nobody
+      reads - which is how a keep-alive that was never keeping anything alive
+      goes unnoticed.
+    """
+    target = _resolve_self_ping_target()
+    if target is None:
+        return
+
+    # Wait 60 seconds after startup before the first ping, so the first request
+    # does not race the listener coming up.
+    await asyncio.sleep(60.0)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(target)
+                logger.info(
+                    "keep_alive_self_ping url=%s status=%d", target, resp.status_code
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as req_err:  # noqa: BLE001 - a keep-alive must not crash
+            logger.warning("keep_alive_self_ping_failed url=%s error=%s", target, req_err)
+        try:
             await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            break
+
+
+#: Hostnames that must never be pinged: this process would be making an
+#: outbound request chosen by configuration, so a loopback or private target is
+#: refused outright. Not an exhaustive SSRF defence (a public name can resolve
+#: to a private address), which is why the endpoint is also required to be HTTPS
+#: - but it stops the obvious cases and, more usefully, stops a typo.
+_SELF_PING_FORBIDDEN_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+    "::1",
+    "metadata.google.internal",
+    "169.254.169.254",
+}
+
+
+def _resolve_self_ping_target() -> str | None:
+    """The validated URL to ping, or None (logging why)."""
+    settings = get_settings()
+    raw = os.environ.get("RENDER_EXTERNAL_URL") or settings.public_url
+    if not raw:
+        logger.info(
+            "keep_alive_self_ping_disabled detail=no RENDER_EXTERNAL_URL or "
+            "GATEWAY_PUBLIC_URL configured; the loop will not run"
+        )
+        return None
+
+    parts = urlsplit(raw)
+    if parts.scheme != "https":
+        logger.error(
+            "keep_alive_self_ping_refused reason=not_https url=%s; the keep-alive "
+            "pings a public URL and must not be used to reach anything else",
+            raw,
+        )
+        return None
+    host = (parts.hostname or "").lower()
+    if not host or host in _SELF_PING_FORBIDDEN_HOSTS or _is_private_host(host):
+        logger.error(
+            "keep_alive_self_ping_refused reason=non_public_host host=%s", host
+        )
+        return None
+    return f"{raw.rstrip('/')}/health"
+
+
+def _is_private_host(host: str) -> bool:
+    """True for an IP literal in a private, loopback, or link-local range."""
+    import ipaddress
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # a name, not a literal - see the note above
+    return (
+        address.is_private or address.is_loopback or address.is_link_local
+    )
 
 
 # --- FastAPI app ---
@@ -316,6 +437,66 @@ async def health_check() -> dict:
     }
 
 
+@app.get("/metrics")
+async def metrics() -> dict:
+    """Operational counters.
+
+    Deliberately small and unauthenticated (like /health) so a scraper or
+    uptime check can read it, and deliberately free of agent identities: it
+    exposes counts, never who.
+    """
+    queue_depth = 0
+    dead_letter_depth = 0
+    if _repository is not None:
+        try:
+            queue_depth = await _repository.queue_depth()
+            dead_letter_depth = await _repository.dead_letter_depth()
+        except Exception as exc:  # pragma: no cover - DB hiccup
+            logger.warning("metrics_queue_depth_failed: %s", exc)
+
+    return {
+        "service": "nexus-gateway",
+        "connections": _connection_manager.active_count if _connection_manager else 0,
+        "max_connections": get_settings().max_connections,
+        "queue_depth": queue_depth,
+        "dead_letter_depth": dead_letter_depth,
+        "replica_id": _queue.replica_id if _queue else None,
+    }
+
+
+@app.get("/dead-letters")
+async def list_dead_letters(limit: int = 50) -> dict:
+    """Inspect messages the gateway gave up on (operator diagnostics).
+
+    Returns counts and metadata; the envelope is included because an operator
+    diagnosing a stuck integration needs to see what failed (the gateway is a
+    relay, and the envelope is already ciphertext-signed and content-agnostic
+    to it).
+    """
+    if _repository is None:
+        raise HTTPException(status_code=503, detail="Repository unavailable")
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be 1..500")
+    rows = await _repository.list_dead_letters(limit=limit)
+    return {
+        "dead_letters": [
+            {
+                "relay_id": r.relay_id,
+                "sender_id": r.sender_id,
+                "recipient_id": r.recipient_id,
+                "reason": r.reason,
+                "detail": r.detail,
+                "delivery_attempts": r.delivery_attempts,
+                "created_at": r.created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if r.created_at
+                else None,
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+    }
+
+
 @app.get("/agents")
 async def list_agents() -> dict:
     """List agents known to the gateway (public info only)."""
@@ -377,18 +558,37 @@ async def search_agents(q: str = "") -> dict:
                     if agent.last_seen_at
                     else None
                 ),
+                "source_gateway": "local",
             }
         )
+
+    # Federation (M9): include peer results so a name search is not silently
+    # limited to this gateway. Peer entries carry `source_gateway` so the
+    # weaker provenance is visible rather than flattened into the local list.
+    if _federation is not None and _federation.enabled:
+        known = {a["agent_id"] for a in agents}
+        for peer_agent in await _federation.search(q.strip()):
+            if peer_agent.get("agent_id") not in known:
+                agents.append(peer_agent)
+
     return {"agents": agents, "total": len(agents)}
 
 
 @app.get("/agents/handle/{handle}")
 async def get_agent_by_handle(handle: str) -> dict:
-    """Exact lookup of a registered agent by public handle (e.g. rahul or @rahul)."""
+    """Exact lookup of a registered agent by public handle (e.g. rahul or @rahul).
+
+    On a local miss, peers are consulted (federation, M9): a handle claimed on
+    another gateway should not read as "does not exist".
+    """
     if _repository is None:
         raise HTTPException(status_code=503, detail="Repository unavailable")
     agent = await _repository.get_by_handle(handle)
     if not agent:
+        if _federation is not None:
+            peer_answer = await _federation.lookup_handle(handle)
+            if peer_answer:
+                return {**peer_answer, "source_gateway": "peer"}
         raise HTTPException(status_code=404, detail="Agent handle not found")
     online = _connection_manager.is_online(agent.agent_id) if _connection_manager else False
     return {
@@ -399,16 +599,27 @@ async def get_agent_by_handle(handle: str) -> dict:
         "is_online": online,
         "agent_card": agent.agent_card,
         "last_seen_at": agent.last_seen_at.strftime("%Y-%m-%dT%H:%M:%SZ") if agent.last_seen_at else None,
+        "source_gateway": "local",
     }
 
 
 @app.get("/agents/{agent_id}")
 async def get_agent_by_id(agent_id: str) -> dict:
-    """Exact authoritative lookup of an agent by canonical Agent ID."""
+    """Exact authoritative lookup of an agent by canonical Agent ID.
+
+    On a local miss, peer gateways are consulted (federation, M9). The answer
+    is marked with ``source_gateway`` so a caller can tell a local record from
+    a peer's claim - a peer's answer is a hint, and the agent's signed card is
+    still what establishes identity.
+    """
     if _repository is None:
         raise HTTPException(status_code=503, detail="Repository unavailable")
     agent = await _repository.get_agent(agent_id)
     if not agent:
+        if _federation is not None:
+            peer_answer = await _federation.lookup_agent(agent_id)
+            if peer_answer:
+                return {**peer_answer, "source_gateway": "peer"}
         raise HTTPException(status_code=404, detail="Agent not found")
     online = _connection_manager.is_online(agent.agent_id) if _connection_manager else False
     return {
@@ -419,6 +630,7 @@ async def get_agent_by_id(agent_id: str) -> dict:
         "is_online": online,
         "agent_card": agent.agent_card,
         "last_seen_at": agent.last_seen_at.strftime("%Y-%m-%dT%H:%M:%SZ") if agent.last_seen_at else None,
+        "source_gateway": "local",
     }
 
 
@@ -496,13 +708,28 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             pass
         return
 
-    await _presence.agent_came_online(
-        agent_id=agent_id,
-        public_key=authed.public_key,
-        display_name=authed.display_name,
-        handle=authed.handle,
-        agent_card=authed.agent_card,
-    )
+    try:
+        await _presence.agent_came_online(
+            agent_id=agent_id,
+            public_key=authed.public_key,
+            display_name=authed.display_name,
+            handle=authed.handle,
+            agent_card=authed.agent_card,
+        )
+    except HandleConflictError as exc:
+        # A handle is owned by exactly one agent. Refuse the connection rather
+        # than letting the newcomer displace the existing owner or crash the
+        # socket with an opaque IntegrityError.
+        logger.warning(
+            "Handle conflict for %s: @%s already claimed", agent_id, exc.handle
+        )
+        await _connection_manager.unregister(agent_id)
+        await reject_websocket(ws, f"Handle '@{exc.handle}' is already claimed.")
+        try:
+            await ws.close(code=4003, reason="Handle already claimed")
+        except Exception:
+            pass
+        return
 
     # --- Flush offline queue ---
     try:
@@ -569,9 +796,41 @@ async def _message_loop(ws: WebSocket, agent_id: str) -> None:
             response = await _router.handle_relay_envelope(frame, agent_id)
             await ws.send_json(response)
 
-        elif frame_type == "delivery_ack":
-            # Client acknowledged receipt — nothing to do for now
-            pass
+        if frame_type == "delivery_ack":
+            # The recipient's ack is the ONLY evidence of actual delivery.
+            # Previously this frame was discarded with a `pass`, so a message
+            # was recorded as delivered the moment bytes reached a socket.
+            try:
+                ack = DeliveryAck.model_validate(raw)
+            except Exception:
+                await ws.send_json(
+                    GatewayError(
+                        code="INVALID_FRAME",
+                        message="Malformed delivery_ack.",
+                    ).model_dump()
+                )
+                continue
+
+            acked = await _router.acknowledge_delivery(ack.relay_id)
+            logger.debug(
+                "Ack for %s from %s: %s",
+                ack.relay_id,
+                agent_id,
+                "recorded" if acked else "unknown/already-delivered",
+            )
+
+        elif frame_type == "delivery_failed":
+            # The recipient could not process a delivery. The row stays
+            # pending: its lease expires and the sweep retries it, or it
+            # reaches max_delivery_attempts and is dead-lettered. We only log
+            # here so a failure cannot silently discard the message.
+            relay_id = raw.get("relay_id")
+            logger.warning(
+                "Recipient %s reported delivery failure for %s: %s",
+                agent_id,
+                relay_id,
+                raw.get("reason", "unspecified"),
+            )
 
         elif frame_type == "heartbeat":
             await _connection_manager.update_heartbeat(agent_id)

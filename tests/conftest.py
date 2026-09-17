@@ -1,4 +1,17 @@
-"""Test fixtures and cryptographic helpers for Nexus Gateway tests."""
+"""Test fixtures and cryptographic helpers for Nexus Gateway tests.
+
+Database-backed tests REQUIRE PostgreSQL. They used to call
+``pytest.skip`` when the database was unreachable, which meant the gateway's
+routing, queueing, auth and persistence behaviour silently went unverified in
+any environment without a database - the exact conditions under which
+regressions shipped. Now a missing database is a hard failure with an
+actionable message, unless ``NEXUS_ALLOW_NO_DB=1`` is set to explicitly opt
+out (useful for a fast, pure-unit local loop).
+
+Start the database with:
+    docker compose up -d gateway_db      # from nexus-gateway/
+or point GATEWAY_TEST_DATABASE_URL at any Postgres 16 instance.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +49,27 @@ from app.security.crypto import agent_id_from_public_key_bytes
 from app.storage.models import Base
 from app.storage.repository import GatewayRepository
 
-TEST_DATABASE_URL = "postgresql+asyncpg://nexus:nexus@localhost:5433/nexus_gateway_test"
+#: Same Postgres host the application's own compose file publishes (5433).
+#: The gateway's compose file publishes 5434; either works via env override.
+TEST_DATABASE_URL = os.environ.get(
+    "GATEWAY_TEST_DATABASE_URL",
+    "postgresql+asyncpg://nexus:nexus@localhost:5433/nexus_gateway_test",
+)
+
+#: Set to 1 to allow the suite to run without a database (DB tests are then
+#: reported as skipped rather than failing).
+ALLOW_NO_DB = os.environ.get("NEXUS_ALLOW_NO_DB") == "1"
+
+
+def _no_db_reason(exc: object) -> str:
+    return (
+        f"PostgreSQL is required for gateway tests but is unreachable "
+        f"({exc}).\n"
+        f"  Fix:  docker compose up -d gateway_db\n"
+        f"  Or:   set GATEWAY_TEST_DATABASE_URL to a reachable Postgres 16\n"
+        f"  Or:   set NEXUS_ALLOW_NO_DB=1 to skip database-backed tests"
+    )
+
 
 
 class TestAgentIdentity:
@@ -118,13 +151,26 @@ def agent_charlie() -> TestAgentIdentity:
 
 @pytest_asyncio.fixture
 async def db_engine() -> AsyncIterator[AsyncEngine]:
-    """Create test DB engine and tables, clean up after test."""
+    """Create the test engine, guarantee a CLEAN schema, and clean up after.
+
+    Fails (rather than skips) when PostgreSQL is unreachable, so that routing,
+    queueing and persistence behaviour cannot silently go unverified.
+
+    Truncation happens on the way IN as well as out. Cleaning only on teardown
+    leaves rows behind from anything that did not tear down cleanly (an
+    interrupted run, a crash, a direct script), which then makes the next run
+    fail with confusing cross-test leakage.
+    """
     try:
         engine = create_async_engine(TEST_DATABASE_URL, echo=False)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            for table in reversed(Base.metadata.sorted_tables):
+                await conn.execute(text(f'TRUNCATE TABLE "{table.name}" CASCADE;'))
     except Exception as exc:
-        pytest.skip(f"Test database unreachable: {exc}")
+        if ALLOW_NO_DB:
+            pytest.skip(_no_db_reason(exc))
+        pytest.fail(_no_db_reason(exc), pytrace=False)
 
     yield engine
 

@@ -1,21 +1,37 @@
-# Nexus Gateway Dependencies
-# Completely independent from Nexus requirements
+# Nexus Gateway — direct dependencies, pinned.
+#
+# Deliberately independent from nexus/requirements.txt: the gateway is a
+# separate service with its own database, its own migration chain, and its own
+# deployment. Sharing a requirements file would couple the two release cycles,
+# which is the thing the audit's H5 (single-replica gateway) argues against.
+#
+# Verification status: every `==` matches a version installed in this
+# repository's test environment. Checked by
+# `tests/test_m11_hardening_regressions.py`.
 
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-pydantic>=2.9.0
-pydantic-settings>=2.6.0
-python-dotenv>=1.0.1
+fastapi==0.115.0
+uvicorn[standard]==0.52.4
+pydantic==2.9.0
+pydantic-settings==2.15.0
+python-dotenv==1.0.1
 
 # Database & Migrations
-sqlalchemy>=2.0.30
-asyncpg>=0.29.0
-alembic>=1.13.0
+sqlalchemy==2.0.35
+asyncpg==0.29.0
+alembic==1.13.0
 
 # Cryptography (Ed25519 verification)
-cryptography>=42.0.0
+cryptography==46.0.1
+
+# WebSocket client.
+# `demo_gateway_communication.py` connects as a client with `websockets`, and
+# that module is the documented way to exercise a real cross-process relay. It
+# was arriving transitively via uvicorn[standard]'s extra; a demo that only works
+# because of another package's extra is a demo that breaks on an unrelated
+# upgrade.
+websockets==17.1
 
 # Testing
-pytest>=8.3.0
-pytest-asyncio>=0.24.0
-httpx>=0.27.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1

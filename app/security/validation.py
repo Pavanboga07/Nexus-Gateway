@@ -11,7 +11,29 @@ from typing import Any
 
 AGENT_ID_PATTERN = re.compile(r"^nexus:ed25519:[0-9a-f]{32}$")
 TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-VALID_MESSAGE_TYPES = {"request", "response", "task_request", "task_response", "task_proposal"}
+VALID_MESSAGE_TYPES = {
+    # 0.1 vocabulary
+    "request",
+    "response",
+    "task_request",
+    "task_response",
+    "task_proposal",
+    # 0.2 vocabulary (M6)
+    "error",
+    "task_progress",
+    "task_cancel",
+    "task_cancelled",
+    "capability_query",
+    "capability_response",
+    "approval_required",
+    "approval_granted",
+    "approval_denied",
+}
+#: Protocol versions this gateway forwards. The gateway is a relay and does not
+#: interpret envelopes, so it accepts every version the app understands rather
+#: than pinning one - otherwise a 0.1 peer's message would be refused by the
+#: relay the moment the app started sending 0.2.
+SUPPORTED_PROTOCOL_VERSIONS = {"0.1", "0.2"}
 
 def validate_envelope_structure(envelope: dict[str, Any]) -> tuple[bool, str | None]:
     """
@@ -22,8 +44,8 @@ def validate_envelope_structure(envelope: dict[str, Any]) -> tuple[bool, str | N
 
     if envelope.get("protocol") != "nexus-a2a":
         return False, "Invalid or missing protocol"
-    
-    if envelope.get("version") != "0.1":
+
+    if envelope.get("version") not in SUPPORTED_PROTOCOL_VERSIONS:
         return False, "Invalid or missing version"
 
     sender = envelope.get("sender")

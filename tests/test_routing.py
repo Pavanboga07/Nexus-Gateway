@@ -46,10 +46,13 @@ async def test_online_routing_delivers_immediately(
         relay_frame, sender_agent_id=agent_alice.agent_id
     )
 
-    # Alice receives delivery_ack with delivered status
+    # Alice receives a delivery_ack. The status is "sent", NOT "delivered":
+    # the gateway has written bytes to Bob's socket, but delivery is only
+    # confirmed when Bob's client ACKS (see test_queue.py). The old code
+    # reported "delivered" here, which was not true.
     assert result["type"] == "delivery_ack"
     assert result["relay_id"] == "relay_12345"
-    assert result["status"] == "delivered"
+    assert result["status"] == "sent"
 
     # Bob received the delivery frame with exact envelope intact
     assert len(bob_frames) == 1

@@ -67,11 +67,18 @@ async def test_reconnection_flushes_offline_queue(
     assert bob_frames[0]["relay_id"] == "relay_reconnect_1"
     assert bob_frames[1]["relay_id"] == "relay_reconnect_2"
 
-    # Messages marked delivered in DB
-    assert await repository.count_queued(agent_bob.agent_id) == 0
+    # Messages are SENT but not yet delivered: delivery is confirmed by the
+    # recipient's ack, not by the gateway writing to the socket.
+    assert await repository.count_queued(agent_bob.agent_id) == 2
 
-    # 4. Immediate second flush should deliver 0
+    # An immediate second flush sends nothing - the rows are leased to this
+    # replica, which is what stops a second replica double-sending them.
     assert await offline_queue.flush_to_agent(agent_bob.agent_id) == 0
+
+    # Bob acks both frames; only now are they delivered.
+    await offline_queue.acknowledge("relay_reconnect_1")
+    await offline_queue.acknowledge("relay_reconnect_2")
+    assert await repository.count_queued(agent_bob.agent_id) == 0
 
 
 @pytest.mark.asyncio

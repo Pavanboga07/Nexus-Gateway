@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.gateway.connection import ConnectionManager
-from app.storage.repository import GatewayRepository
+from app.storage.repository import GatewayRepository, HandleConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,11 @@ class PresenceTracker:
         handle: str | None = None,
         agent_card: dict[str, Any] | None = None,
     ) -> None:
-        """Record that an agent has connected and authenticated."""
+        """Record that an agent has connected and authenticated.
+
+        Raises:
+            HandleConflictError: the requested handle belongs to another agent.
+        """
         await self._repo.register_agent(
             agent_id=agent_id,
             public_key=public_key,

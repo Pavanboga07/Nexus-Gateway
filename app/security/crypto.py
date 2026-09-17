@@ -46,8 +46,12 @@ def verify_signature(public_key_b64: str, data: bytes, signature_b64: str) -> bo
         public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
         public_key.verify(signature_bytes, data)
         return True
-    except (ValueError, TypeError, InvalidSignature, Exception) as e:
-        logger.debug(f"Signature verification failed: {e}")
+    except Exception as exc:
+        # Deliberately broad: this is a verification boundary and must never
+        # raise into the caller. (An earlier revision listed
+        # `(ValueError, TypeError, InvalidSignature, Exception)`, which is
+        # both redundant and flagged by linters.)
+        logger.debug("Signature verification failed: %s", exc)
         return False
 
 def agent_id_from_public_key_bytes(public_key_raw: bytes) -> str:
