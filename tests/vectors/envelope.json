@@ -1,0 +1,106 @@
+{
+  "vectors": [
+    {
+      "name": "request-with-correlation",
+      "envelope": {
+        "protocol": "nexus-a2a",
+        "version": "0.3",
+        "message_id": "msg_vector001",
+        "correlation_id": "corr_vector001",
+        "sender": "nexus:ed25519:10ba682c8ad13513971e8b56881aab8b",
+        "recipient": "nexus:ed25519:1325b850c2871916eae203f0efc3c898",
+        "timestamp": "2026-09-20T12:00:00Z",
+        "expires_at": "2026-09-20T12:05:00Z",
+        "message_type": "request",
+        "payload": {
+          "action": "answer",
+          "data_category": "general"
+        },
+        "signature": "1/rDjqFZSP34P18IMtinQd5tz/XKa3eZuUCNWAlBKxn0T2v5R/bkJoXenooixKYc4wdrxHg8EF5uMtTjXGbRBg=="
+      },
+      "canonical_hex": "7b22636f7272656c6174696f6e5f6964223a22636f72725f766563746f72303031222c22657870697265735f6174223a22323032362d30392d32305431323a30353a30305a222c226d6573736167655f6964223a226d73675f766563746f72303031222c226d6573736167655f74797065223a2272657175657374222c227061796c6f6164223a7b22616374696f6e223a22616e73776572222c22646174615f63617465676f7279223a2267656e6572616c227d2c2270726f746f636f6c223a226e657875732d613261222c22726563697069656e74223a226e657875733a656432353531393a3133323562383530633238373139313665616532303366306566633363383938222c2273656e646572223a226e657875733a656432353531393a3130626136383263386164313335313339373165386235363838316161623862222c2274696d657374616d70223a22323032362d30392d32305431323a30303a30305a222c2276657273696f6e223a22302e33227d",
+      "public_key": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+      "verifies": true
+    },
+    {
+      "name": "approve-reply",
+      "envelope": {
+        "protocol": "nexus-a2a",
+        "version": "0.3",
+        "message_id": "msg_vector002",
+        "correlation_id": "corr_vector001",
+        "sender": "nexus:ed25519:1325b850c2871916eae203f0efc3c898",
+        "recipient": "nexus:ed25519:10ba682c8ad13513971e8b56881aab8b",
+        "timestamp": "2026-09-20T12:01:00Z",
+        "expires_at": "2026-09-20T12:06:00Z",
+        "message_type": "approve",
+        "payload": {
+          "approved": true,
+          "scope": "answer-once"
+        },
+        "signature": "CTwDcI/rM17IJhWAfidEOL//mQOdMJURpBSlF/p+AZN1lKPeqI/oJ11XqY9FqWkLN+LvAXFKaR5ynlQNRck0DA=="
+      },
+      "canonical_hex": "7b22636f7272656c6174696f6e5f6964223a22636f72725f766563746f72303031222c22657870697265735f6174223a22323032362d30392d32305431323a30363a30305a222c226d6573736167655f6964223a226d73675f766563746f72303032222c226d6573736167655f74797065223a22617070726f7665222c227061796c6f6164223a7b22617070726f766564223a747275652c2273636f7065223a22616e737765722d6f6e6365227d2c2270726f746f636f6c223a226e657875732d613261222c22726563697069656e74223a226e657875733a656432353531393a3130626136383263386164313335313339373165386235363838316161623862222c2273656e646572223a226e657875733a656432353531393a3133323562383530633238373139313665616532303366306566633363383938222c2274696d657374616d70223a22323032362d30392d32305431323a30313a30305a222c2276657273696f6e223a22302e33227d",
+      "public_key": "oJql9HpnWYAv+VX43C0qFKXJnSO+l/hkEn/5ODRVpPA=",
+      "verifies": true
+    }
+  ],
+  "rejections": [
+    {
+      "name": "float-payload",
+      "envelope": {
+        "protocol": "nexus-a2a",
+        "version": "0.3",
+        "message_id": "msg_badfloat",
+        "correlation_id": "corr_vector001",
+        "sender": "nexus:ed25519:10ba682c8ad13513971e8b56881aab8b",
+        "recipient": "nexus:ed25519:1325b850c2871916eae203f0efc3c898",
+        "timestamp": "2026-09-20T12:00:00Z",
+        "expires_at": "2026-09-20T12:05:00Z",
+        "message_type": "request",
+        "payload": {
+          "score": 0.5
+        }
+      },
+      "error_hint": "float"
+    },
+    {
+      "name": "bad-timestamp",
+      "envelope": {
+        "protocol": "nexus-a2a",
+        "version": "0.3",
+        "message_id": "msg_badts",
+        "correlation_id": "corr_vector001",
+        "sender": "nexus:ed25519:10ba682c8ad13513971e8b56881aab8b",
+        "recipient": "nexus:ed25519:1325b850c2871916eae203f0efc3c898",
+        "timestamp": "20-09-2026 12:00",
+        "expires_at": "2026-09-20T12:05:00Z",
+        "message_type": "request",
+        "payload": {
+          "action": "answer",
+          "data_category": "general"
+        }
+      },
+      "error_hint": "timestamp"
+    },
+    {
+      "name": "unknown-type",
+      "envelope": {
+        "protocol": "nexus-a2a",
+        "version": "0.3",
+        "message_id": "msg_badtype",
+        "correlation_id": "corr_vector001",
+        "sender": "nexus:ed25519:10ba682c8ad13513971e8b56881aab8b",
+        "recipient": "nexus:ed25519:1325b850c2871916eae203f0efc3c898",
+        "timestamp": "2026-09-20T12:00:00Z",
+        "expires_at": "2026-09-20T12:05:00Z",
+        "message_type": "teleport",
+        "payload": {
+          "action": "answer",
+          "data_category": "general"
+        }
+      },
+      "error_hint": "message_type"
+    }
+  ]
+}

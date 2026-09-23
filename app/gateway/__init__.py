@@ -1,3 +1,0 @@
-"""
-Nexus Gateway package.
-"""

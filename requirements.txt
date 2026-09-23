@@ -1,37 +1,24 @@
-# Nexus Gateway — direct dependencies, pinned.
+# Nexus relay (v0.3) — direct dependencies, pinned.
 #
-# Deliberately independent from nexus/requirements.txt: the gateway is a
-# separate service with its own database, its own migration chain, and its own
-# deployment. Sharing a requirements file would couple the two release cycles,
-# which is the thing the audit's H5 (single-replica gateway) argues against.
-#
-# Verification status: every `==` matches a version installed in this
-# repository's test environment. Checked by
-# `tests/test_m11_hardening_regressions.py`.
+# Ported from nexus-v1: the relay is Postgres-backed (queue claims need
+# SELECT ... FOR UPDATE SKIP LOCKED, so there is no SQLite backend).
+# Every `==` matches a version installed in this repository's test
+# environment. Nothing new is pinned beyond what nexus-v1 pins
+# (cryptography); the other pins are carried over from the gateway's
+# previous requirements at their installed versions.
 
 fastapi==0.115.0
 uvicorn[standard]==0.52.4
 pydantic==2.9.0
-pydantic-settings==2.15.0
-python-dotenv==1.0.1
+httpx==0.28.1
 
-# Database & Migrations
+# Database & Migrations (Postgres only)
 sqlalchemy==2.0.35
 asyncpg==0.29.0
 alembic==1.13.0
 
-# Cryptography (Ed25519 verification)
+# Cryptography (Ed25519 auth/envelope verification via app/identity)
 cryptography==46.0.1
-
-# WebSocket client.
-# `demo_gateway_communication.py` connects as a client with `websockets`, and
-# that module is the documented way to exercise a real cross-process relay. It
-# was arriving transitively via uvicorn[standard]'s extra; a demo that only works
-# because of another package's extra is a demo that breaks on an unrelated
-# upgrade.
-websockets==17.1
 
 # Testing
 pytest==9.1.1
-pytest-asyncio==1.4.0
-httpx==0.28.1

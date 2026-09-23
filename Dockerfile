@@ -12,10 +12,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY alembic.ini .
-COPY migrations/ ./migrations/
+COPY alembic/ ./alembic/
+COPY relay/ ./relay/
 COPY app/ ./app/
 COPY run.py .
 
-EXPOSE 9000
+EXPOSE 8000
 
 CMD ["python", "run.py"]
