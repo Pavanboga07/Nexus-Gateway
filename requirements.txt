@@ -14,7 +14,7 @@ httpx==0.28.1
 
 # Database & Migrations (Postgres only)
 sqlalchemy==2.0.35
-asyncpg==0.29.0
+asyncpg==0.31.0
 alembic==1.13.0
 
 # Cryptography (Ed25519 auth/envelope verification via app/identity)
