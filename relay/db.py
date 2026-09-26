@@ -20,6 +20,18 @@ from sqlalchemy.ext.asyncio import (
 from relay.models import TABLE_NAMES, Base
 
 
+def normalize_database_url(url: str) -> str:
+    """Accept plain ``postgresql://`` URLs (what every dashboard hands out)
+    and adapt them to what this service needs: the asyncpg driver plus the
+    ``ssl`` query spelling asyncpg understands. Anything else passes through
+    untouched so explicit asyncpg URLs never change meaning."""
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    # asyncpg wants ssl=require; dashboards emit sslmode=require.
+    url = url.replace("sslmode=require", "ssl=require")
+    return url
+
+
 def resolve_database_url(explicit: str | None = None) -> str:
     """Explicit URL wins, else ``RELAY_DATABASE_URL`` env. Never defaults
     to a guess: connecting to the wrong Postgres silently is worse than
@@ -30,7 +42,7 @@ def resolve_database_url(explicit: str | None = None) -> str:
             "No relay database configured: pass database_url or set "
             "RELAY_DATABASE_URL."
         )
-    return url
+    return normalize_database_url(url)
 
 
 def make_engine(url: str) -> AsyncEngine:
