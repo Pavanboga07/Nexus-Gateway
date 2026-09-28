@@ -12,6 +12,13 @@ def test_plain_postgres_url_upgraded_to_asyncpg():
     assert out == "postgresql+asyncpg://u:p@host/db?ssl=require"
 
 
+def test_neon_channel_binding_stripped_others_kept():
+    out = normalize_database_url(
+        "postgresql://u:p@host/db?sslmode=require&channel_binding=require&connect_timeout=10"
+    )
+    assert out == "postgresql+asyncpg://u:p@host/db?ssl=require&connect_timeout=10"
+
+
 def test_explicit_asyncpg_url_untouched():
     url = "postgresql+asyncpg://u:p@host/db?ssl=require"
     assert normalize_database_url(url) == url

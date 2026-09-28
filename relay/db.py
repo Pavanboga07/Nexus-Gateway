@@ -29,6 +29,15 @@ def normalize_database_url(url: str) -> str:
         url = "postgresql+asyncpg://" + url[len("postgresql://"):]
     # asyncpg wants ssl=require; dashboards emit sslmode=require.
     url = url.replace("sslmode=require", "ssl=require")
+    # Neon appends channel_binding=require (a libpq-ism for SCRAM binding).
+    # asyncpg does not accept that keyword, so strip it: SCRAM still
+    # authenticates, just without channel binding — identical to local runs.
+    parts = url.split("?", 1)
+    if len(parts) == 2:
+        kept = "&".join(
+            p for p in parts[1].split("&") if not p.startswith("channel_binding=")
+        )
+        url = parts[0] + ("?" + kept if kept else "")
     return url
 
 
