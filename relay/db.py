@@ -7,6 +7,7 @@ a separate ``nexus_relay_test`` database (see tests/relay_db.py).
 
 from __future__ import annotations
 
+import logging
 import os
 
 from sqlalchemy import text
@@ -18,6 +19,9 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from relay.models import TABLE_NAMES, Base
+
+
+logger = logging.getLogger("relay.db")
 
 
 def normalize_database_url(url: str) -> str:
@@ -55,7 +59,16 @@ def resolve_database_url(explicit: str | None = None) -> str:
 
 
 def make_engine(url: str) -> AsyncEngine:
-    return create_async_engine(url, pool_size=5, max_overflow=5)
+    # prepared_statement_cache_size=0: Neon (and any PgBouncer-style
+    # pooler) runs in transaction mode, where server-side prepared
+    # statements fail. Disabling the cache keeps every query working
+    # through a pooler; direct connections are unaffected.
+    return create_async_engine(
+        url,
+        pool_size=5,
+        max_overflow=5,
+        connect_args={"prepared_statement_cache_size": 0},
+    )
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
@@ -87,7 +100,10 @@ async def check_ready(engine: AsyncEngine) -> bool:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return True
-    except Exception:
+    except Exception as exc:
+        # Never silent: a health check that swallows its reason turns every
+        # future outage into a guessing game (learned the hard way).
+        logger.warning("readiness check failed: %s", type(exc).__name__)
         return False
 
 
