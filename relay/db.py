@@ -100,10 +100,10 @@ async def check_ready(engine: AsyncEngine) -> bool:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return True
-    except Exception as exc:
-        # Never silent: a health check that swallows its reason turns every
-        # future outage into a guessing game (learned the hard way).
-        logger.warning("readiness check failed: %s", type(exc).__name__)
+    except Exception:
+        # Full traceback server-side: the bare type name hid a live
+        # incident behind "InvalidPasswordError" with no further detail.
+        logger.exception("readiness check failed")
         return False
 
 

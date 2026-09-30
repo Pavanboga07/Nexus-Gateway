@@ -53,6 +53,23 @@ def _new_correlation_id() -> str:
     return f"corr_{uuid.uuid4().hex}"
 
 
+def _safe_db_host(url: str) -> str:
+    """Host portion of a database URL for diagnostics (never credentials)."""
+    try:
+        return url.split("@", 1)[1].split("/", 1)[0].split("?", 1)[0]
+    except Exception:
+        return "unparseable"
+
+
+def _safe_db_name(url: str) -> str:
+    """Database name portion (never credentials)."""
+    try:
+        rest = url.split("@", 1)[1].split("/", 1)[1]
+        return rest.split("?", 1)[0] or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def create_relay_app(
     *,
     database_url: str | None = None,
@@ -85,6 +102,11 @@ def create_relay_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await init_schema(engine)
+        log_event(
+            "relay_db_ready",
+            host=_safe_db_host(url),
+            database=_safe_db_name(url),
+        )
         ping_task = None
         if self_ping_url and self_ping_interval > 0:
             ping_task = asyncio.create_task(self_ping_loop())
