@@ -55,7 +55,10 @@ def resolve_database_url(explicit: str | None = None) -> str:
             "No relay database configured: pass database_url or set "
             "RELAY_DATABASE_URL."
         )
-    return normalize_database_url(url)
+    # Dashboard copy-paste regularly smuggles in a trailing newline or
+    # space, which the database reads as part of the password (→ auth
+    # failure). URLs cannot legitimately start or end with whitespace.
+    return normalize_database_url(url.strip())
 
 
 def make_engine(url: str) -> AsyncEngine:
