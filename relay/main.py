@@ -1,15 +1,16 @@
-"""Single-process relay: WebSocket delivery + REST directory + presence.
+"""Relay boot contract: FRESH EMPTY DATABASE ONLY.
 
-Decentralized trust: the relay is a dumb pipe with smart edges — it
-never sees private keys and cannot forge envelopes (signatures are the
-edges' business; the relay checks shape and time windows only). All
-shared state lives in Postgres from line one (queue, UNIQUE dedup,
-presence, challenges) so a second replica can appear without redesign.
+This service assumes a fresh empty Postgres database. There is no
+old-schema compatibility, no migration, no ALTER TABLE fallback: boot
+runs Base.metadata.create_all() then VERIFIES every expected table
+exists and crashes loudly naming any missing table. A sabotaged or
+partial schema never serves traffic.
 
-Observability: ``/health`` (liveness), ``/readyz`` (DB check),
-``/metrics`` (connections, queue depth, deliveries, drops, auth
-failures). Logs are JSON with correlation IDs. The free-tier self-ping
-loop exists but is OFF unless explicitly enabled.
+Design: v0.3 envelopes, Ed25519 challenge-response (single-use),
+ack-driven outbox (TTL + DLQ + redelivery), UNIQUE dedup, hardened
+directory (auth writes, rate limit, pagination, atomic handles,
+unconditional verification), presence, invites, /health + /readyz +
+/metrics, JSON logs with correlation IDs, self-ping OFF by default.
 """
 
 from __future__ import annotations
@@ -26,13 +27,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from relay import auth, directory, invites, presence, queue
-from relay.db import (
-    check_ready,
-    init_schema,
-    make_engine,
-    make_session_factory,
-    resolve_database_url,
-)
+from relay.db import check_ready, init_and_verify, make_engine, make_session_factory, resolve_database_url
 from relay.envelope import Envelope, EnvelopeError
 
 logger = logging.getLogger("relay")
@@ -43,10 +38,7 @@ DIRECTORY_RATE_LIMIT_DEFAULT = 60
 
 
 def log_event(event: str, correlation_id: str | None = None, **fields) -> None:
-    """One JSON log line (correlation IDs join a multi-hop exchange)."""
-    logger.info(json.dumps(
-        {"event": event, "correlation_id": correlation_id, **fields}
-    ))
+    logger.info(json.dumps({"event": event, "correlation_id": correlation_id, **fields}))
 
 
 def _new_correlation_id() -> str:
@@ -54,7 +46,6 @@ def _new_correlation_id() -> str:
 
 
 def _safe_db_host(url: str) -> str:
-    """Host portion of a database URL for diagnostics (never credentials)."""
     try:
         return url.split("@", 1)[1].split("/", 1)[0].split("?", 1)[0]
     except Exception:
@@ -62,7 +53,6 @@ def _safe_db_host(url: str) -> str:
 
 
 def _safe_db_name(url: str) -> str:
-    """Database name portion (never credentials)."""
     try:
         rest = url.split("@", 1)[1].split("/", 1)[1]
         return rest.split("?", 1)[0] or "unknown"
@@ -79,11 +69,9 @@ def create_relay_app(
     self_ping_url: str | None = None,
     self_ping_interval: float = 0,
 ) -> FastAPI:
-    """Build the relay app. Self-ping stays OFF unless configured."""
     url = resolve_database_url(database_url)
     engine = make_engine(url)
     Session = make_session_factory(engine)
-
     live_sockets: dict[str, WebSocket] = {}
     pending_acks: dict[str, dict[str, Any]] = {}
     counters = {"deliveries": 0, "auth_failures": 0}
@@ -96,17 +84,13 @@ def create_relay_app(
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.get(f"{self_ping_url}/health")
-            except Exception as exc:  # stopgap loop must never crash
+            except Exception as exc:
                 log_event("self_ping_failed", error=str(exc))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await init_schema(engine)
-        log_event(
-            "relay_db_ready",
-            host=_safe_db_host(url),
-            database=_safe_db_name(url),
-        )
+        await init_and_verify(engine)
+        log_event("relay_db_ready", host=_safe_db_host(url), database=_safe_db_name(url))
         ping_task = None
         if self_ping_url and self_ping_interval > 0:
             ping_task = asyncio.create_task(self_ping_loop())
@@ -116,14 +100,8 @@ def create_relay_app(
             ping_task.cancel()
         await engine.dispose()
 
-    app = FastAPI(title="nexus relay")
-    app.state.relay_config = {
-        "directory_rate_limit": directory_rate_limit,
-        "ack_timeout": ack_timeout,
-        "replica_id": replica_id,
-    }
-
-    # --- observability + REST ------------------------------------------
+    app = FastAPI(title="nexus relay", lifespan=lifespan)
+    app.state.relay_config = {"directory_rate_limit": directory_rate_limit, "ack_timeout": ack_timeout, "replica_id": replica_id}
 
     @app.get("/health")
     async def health():
@@ -140,22 +118,14 @@ def create_relay_app(
         async with Session() as session:
             depth = await queue.queue_depth(session)
             drops = await queue.dlq_depth(session)
-        return {
-            "connections": len(live_sockets),
-            "queue_depth": depth,
-            "deliveries": counters["deliveries"],
-            "drops": drops,
-            "auth_failures": counters["auth_failures"],
-        }
+        return {"connections": len(live_sockets), "queue_depth": depth, "deliveries": counters["deliveries"], "drops": drops, "auth_failures": counters["auth_failures"]}
 
     @app.get("/presence/{agent_id}")
     async def get_presence(agent_id: str):
         async with Session() as session:
             row = await presence.get_presence(session, agent_id)
         if row is None:
-            return JSONResponse(
-                status_code=404, content={"detail": "unknown agent"}
-            )
+            return JSONResponse(status_code=404, content={"detail": "unknown agent"})
         return row
 
     @app.put("/directory/{agent_id}")
@@ -164,26 +134,14 @@ def create_relay_app(
         try:
             ip = request.client.host if request.client else "unknown"
             async with Session() as session:
-                await directory.check_rate_limit(
-                    session, ip, limit=directory_rate_limit
-                )
-                if not isinstance(card, dict) or (
-                    card.get("agent_id") != agent_id
-                ):
-                    raise directory.DirectoryError(
-                        400, "PATH_MISMATCH",
-                        "card agent_id must match the request path",
-                    )
+                await directory.check_rate_limit(session, ip, limit=directory_rate_limit)
+                if not isinstance(card, dict) or (card.get("agent_id") != agent_id):
+                    raise directory.DirectoryError(400, "PATH_MISMATCH", "card agent_id must match the request path")
                 await directory.store_entry(session, card)
                 await session.commit()
         except directory.DirectoryError as exc:
-            log_event(
-                "directory_write_rejected", code=exc.code, agent_id=agent_id
-            )
-            return JSONResponse(
-                status_code=exc.status,
-                content={"detail": str(exc), "code": exc.code},
-            )
+            log_event("directory_write_rejected", code=exc.code, agent_id=agent_id)
+            return JSONResponse(status_code=exc.status, content={"detail": str(exc), "code": exc.code})
         log_event("directory_write_stored", agent_id=agent_id)
         return {"agent_id": agent_id}
 
@@ -192,17 +150,13 @@ def create_relay_app(
         async with Session() as session:
             card = await directory.get_entry(session, agent_id)
         if card is None:
-            return JSONResponse(
-                status_code=404, content={"detail": "unknown agent"}
-            )
+            return JSONResponse(status_code=404, content={"detail": "unknown agent"})
         return {"agent_id": agent_id, "card": card}
 
     @app.get("/directory")
     async def list_cards(limit: int = 50, offset: int = 0):
         async with Session() as session:
-            total, items = await directory.list_entries(
-                session, limit=limit, offset=offset
-            )
+            total, items = await directory.list_entries(session, limit=limit, offset=offset)
         return {"total": total, "items": items}
 
     @app.post("/invites")
@@ -212,21 +166,13 @@ def create_relay_app(
         ttl = body.get("ttl_seconds", invites.INVITE_TTL_SECONDS)
         try:
             async with Session() as session:
-                expires_at = await invites.create_invite_entry(
-                    session, card, code, ttl_seconds=ttl
-                )
+                expires_at = await invites.create_invite_entry(session, card, code, ttl_seconds=ttl)
                 await session.commit()
         except invites.InviteClaimError as exc:
             log_event("invite_publish_rejected", code=exc.code)
-            return JSONResponse(
-                status_code=exc.status,
-                content={"detail": str(exc), "code": exc.code},
-            )
+            return JSONResponse(status_code=exc.status, content={"detail": str(exc), "code": exc.code})
         log_event("invite_published", agent_id=card.get("agent_id"))
-        return {
-            "agent_id": card.get("agent_id"),
-            "expires_at": expires_at.isoformat(),
-        }
+        return {"agent_id": card.get("agent_id"), "expires_at": expires_at.isoformat()}
 
     @app.post("/invites/claim")
     async def claim_invite(body: dict, request: Request):
@@ -238,16 +184,10 @@ def create_relay_app(
                 await session.commit()
         except invites.InviteClaimError as exc:
             log_event("invite_claim_rejected", code=exc.code)
-            return JSONResponse(
-                status_code=exc.status,
-                content={"detail": str(exc), "code": exc.code},
-            )
+            return JSONResponse(status_code=exc.status, content={"detail": str(exc), "code": exc.code})
         return {"card": card}
 
-    # --- websocket helpers ----------------------------------------------
-
     async def settle_ack(delivery_id: str) -> bool:
-        """Settle a recipient ack; True when a live sender waits on it."""
         entry = pending_acks.get(delivery_id)
         if entry is None:
             return False
@@ -258,23 +198,12 @@ def create_relay_app(
         entry["event"].set()
         return True
 
-    def track_delivery(
-        delivery_id: str,
-        message_id: str,
-        sender_ws: WebSocket | None,
-        sender_relay_id: str | None,
-    ) -> asyncio.Event:
+    def track_delivery(delivery_id: str, message_id: str, sender_ws: WebSocket | None, sender_relay_id: str | None) -> asyncio.Event:
         event = asyncio.Event()
-        pending_acks[delivery_id] = {
-            "event": event,
-            "message_id": message_id,
-            "sender_ws": sender_ws,
-            "sender_relay_id": sender_relay_id,
-        }
+        pending_acks[delivery_id] = {"event": event, "message_id": message_id, "sender_ws": sender_ws, "sender_relay_id": sender_relay_id}
         return event
 
     async def flush_pending(agent_id: str, ws: WebSocket) -> None:
-        """Redeliver unacked rows on (re)connect; acks settle whenever."""
         async with Session() as session:
             rows = await queue.claim_for_recipient(session, agent_id)
             await session.commit()
@@ -282,58 +211,25 @@ def create_relay_app(
             delivery_id = f"dlv_{uuid.uuid4().hex}"
             track_delivery(delivery_id, row["message_id"], None, None)
             try:
-                await ws.send_json(
-                    {
-                        "type": "delivery",
-                        "relay_id": delivery_id,
-                        "envelope": row["envelope"],
-                    }
-                )
+                await ws.send_json({"type": "delivery", "relay_id": delivery_id, "envelope": row["envelope"]})
             except Exception:
                 break
 
-    async def handle_envelope(
-        ws: WebSocket, agent_id: str, frame: dict[str, Any]
-    ) -> None:
+    async def handle_envelope(ws: WebSocket, agent_id: str, frame: dict[str, Any]) -> None:
         sender_relay_id = frame.get("relay_id")
         raw_envelope = frame.get("envelope")
         recipient = frame.get("recipient")
-        correlation_id = (
-            frame.get("correlation_id")
-            or (raw_envelope.get("correlation_id") if isinstance(raw_envelope, dict) else None)
-            or _new_correlation_id()
-        )
+        correlation_id = (frame.get("correlation_id") or (raw_envelope.get("correlation_id") if isinstance(raw_envelope, dict) else None) or _new_correlation_id())
         try:
             env = Envelope.validate_live(raw_envelope)
         except (ValidationError, EnvelopeError) as exc:
-            await ws.send_json(
-                {
-                    "type": "error",
-                    "code": "INVALID_ENVELOPE",
-                    "message": f"envelope rejected: {exc}",
-                    "correlation_id": correlation_id,
-                }
-            )
+            await ws.send_json({"type": "error", "code": "INVALID_ENVELOPE", "message": f"envelope rejected: {exc}", "correlation_id": correlation_id})
             return
         if not recipient or recipient != env.recipient:
-            await ws.send_json(
-                {
-                    "type": "error",
-                    "code": "INVALID_ENVELOPE",
-                    "message": "frame recipient must match the envelope",
-                    "correlation_id": correlation_id,
-                }
-            )
+            await ws.send_json({"type": "error", "code": "INVALID_ENVELOPE", "message": "frame recipient must match the envelope", "correlation_id": correlation_id})
             return
         if env.sender != agent_id:
-            await ws.send_json(
-                {
-                    "type": "error",
-                    "code": "SENDER_MISMATCH",
-                    "message": "envelope sender must match the connection",
-                    "correlation_id": correlation_id,
-                }
-            )
+            await ws.send_json({"type": "error", "code": "SENDER_MISMATCH", "message": "envelope sender must match the connection", "correlation_id": correlation_id})
             return
         envelope = env.model_dump(exclude_none=True)
         async with Session() as session:
@@ -341,62 +237,29 @@ def create_relay_app(
                 outcome = await queue.enqueue(session, envelope=envelope)
             except ValueError as exc:
                 await session.rollback()
-                await ws.send_json(
-                    {
-                        "type": "error",
-                        "code": "INVALID_ENVELOPE",
-                        "message": str(exc),
-                        "correlation_id": correlation_id,
-                    }
-                )
+                await ws.send_json({"type": "error", "code": "INVALID_ENVELOPE", "message": str(exc), "correlation_id": correlation_id})
                 return
             await session.commit()
-        log_event(
-            "envelope_queued", correlation_id,
-            message_id=env.message_id, outcome=outcome,
-        )
+        log_event("envelope_queued", correlation_id, message_id=env.message_id, outcome=outcome)
         target = live_sockets.get(env.recipient)
         if target is None:
-            await ws.send_json(
-                {"type": "delivery_ack",
-                 "relay_id": sender_relay_id, "status": "queued"}
-            )
+            await ws.send_json({"type": "delivery_ack", "relay_id": sender_relay_id, "status": "queued"})
             return
         delivery_id = f"dlv_{uuid.uuid4().hex}"
-        event = track_delivery(
-            delivery_id, env.message_id, ws, sender_relay_id
-        )
+        event = track_delivery(delivery_id, env.message_id, ws, sender_relay_id)
         try:
-            await target.send_json(
-                {
-                    "type": "delivery",
-                    "relay_id": delivery_id,
-                    "envelope": envelope,
-                    "correlation_id": correlation_id,
-                }
-            )
+            await target.send_json({"type": "delivery", "relay_id": delivery_id, "envelope": envelope, "correlation_id": correlation_id})
         except Exception:
             pending_acks.pop(delivery_id, None)
-            await ws.send_json(
-                {"type": "delivery_ack",
-                 "relay_id": sender_relay_id, "status": "queued"}
-            )
+            await ws.send_json({"type": "delivery_ack", "relay_id": sender_relay_id, "status": "queued"})
             return
         try:
             await asyncio.wait_for(event.wait(), timeout=ack_timeout)
-            await ws.send_json(
-                {"type": "delivery_ack",
-                 "relay_id": sender_relay_id, "status": "delivered"}
-            )
+            await ws.send_json({"type": "delivery_ack", "relay_id": sender_relay_id, "status": "delivered"})
         except asyncio.TimeoutError:
-            await ws.send_json(
-                {"type": "delivery_ack",
-                 "relay_id": sender_relay_id, "status": "queued"}
-            )
+            await ws.send_json({"type": "delivery_ack", "relay_id": sender_relay_id, "status": "queued"})
         finally:
             pending_acks.pop(delivery_id, None)
-
-    # --- websocket -------------------------------------------------------
 
     @app.websocket("/ws")
     async def relay_socket(ws: WebSocket):
@@ -407,70 +270,27 @@ def create_relay_app(
             async with Session() as session:
                 challenge_b64 = await auth.mint_challenge(session)
                 await session.commit()
-            await ws.send_json(
-                {
-                    "type": "auth_challenge",
-                    "challenge": challenge_b64,
-                    "correlation_id": correlation_id,
-                }
-            )
+            await ws.send_json({"type": "auth_challenge", "challenge": challenge_b64, "correlation_id": correlation_id})
             frame = await ws.receive_json()
-            if not isinstance(frame, dict) or (
-                frame.get("type") != "auth_response"
-            ):
-                await ws.send_json(
-                    {
-                        "type": "error",
-                        "code": "UNAUTHENTICATED",
-                        "message": "first frame must be auth_response",
-                        "correlation_id": correlation_id,
-                    }
-                )
+            if not isinstance(frame, dict) or (frame.get("type") != "auth_response"):
+                await ws.send_json({"type": "error", "code": "UNAUTHENTICATED", "message": "first frame must be auth_response", "correlation_id": correlation_id})
                 await ws.close(code=WS_CLOSE_UNAUTHORIZED)
                 return
             try:
                 async with Session() as session:
-                    agent_id = await auth.verify_and_consume(
-                        session,
-                        challenge_b64=frame.get("challenge", challenge_b64),
-                        agent_id=frame.get("agent_id", ""),
-                        public_key_b64=frame.get("public_key", ""),
-                        signature_b64=frame.get("signature", ""),
-                    )
+                    agent_id = await auth.verify_and_consume(session, challenge_b64=frame.get("challenge", challenge_b64), agent_id=frame.get("agent_id", ""), public_key_b64=frame.get("public_key", ""), signature_b64=frame.get("signature", ""))
                     await session.commit()
             except auth.AuthError as exc:
                 counters["auth_failures"] += 1
-                log_event(
-                    "auth_failed", correlation_id,
-                    code=exc.code,
-                    agent_id=frame.get("agent_id"),
-                )
-                await ws.send_json(
-                    {
-                        "type": "auth_result",
-                        "success": False,
-                        "code": exc.code,
-                        "message": str(exc),
-                        "correlation_id": correlation_id,
-                    }
-                )
+                log_event("auth_failed", correlation_id, code=exc.code, agent_id=frame.get("agent_id"))
+                await ws.send_json({"type": "auth_result", "success": False, "code": exc.code, "message": str(exc), "correlation_id": correlation_id})
                 await ws.close(code=WS_CLOSE_UNAUTHORIZED)
                 return
-            # Authenticated: no card echo, ever.
             live_sockets[agent_id] = ws
             log_event("auth_ok", correlation_id, agent_id=agent_id)
-            await ws.send_json(
-                {
-                    "type": "auth_result",
-                    "success": True,
-                    "agent_id": agent_id,
-                    "correlation_id": correlation_id,
-                }
-            )
+            await ws.send_json({"type": "auth_result", "success": True, "agent_id": agent_id, "correlation_id": correlation_id})
             async with Session() as session:
-                await presence.heartbeat(
-                    session, agent_id, replica_id=replica_id
-                )
+                await presence.heartbeat(session, agent_id, replica_id=replica_id)
                 await session.commit()
             await flush_pending(agent_id, ws)
             while True:
@@ -480,9 +300,7 @@ def create_relay_app(
                 kind = frame.get("type")
                 if kind == "heartbeat":
                     async with Session() as session:
-                        await presence.heartbeat(
-                            session, agent_id, replica_id=replica_id
-                        )
+                        await presence.heartbeat(session, agent_id, replica_id=replica_id)
                         await session.commit()
                     await ws.send_json({"type": "heartbeat_ack"})
                 elif kind == "relay_envelope":
@@ -490,20 +308,13 @@ def create_relay_app(
                 elif kind == "delivery_ack":
                     await settle_ack(frame.get("relay_id", ""))
                 else:
-                    await ws.send_json(
-                        {
-                            "type": "error",
-                            "code": "UNKNOWN_FRAME",
-                            "message": f"unknown frame type {kind!r}",
-                        }
-                    )
+                    await ws.send_json({"type": "error", "code": "UNKNOWN_FRAME", "message": f"unknown frame type {kind!r}"})
         except WebSocketDisconnect:
             pass
         finally:
             if agent_id is not None and live_sockets.get(agent_id) is ws:
                 del live_sockets[agent_id]
             log_event("socket_closed", correlation_id, agent_id=agent_id)
-
     return app
 
 

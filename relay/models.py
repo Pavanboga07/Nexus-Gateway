@@ -1,33 +1,15 @@
-"""Relay Postgres models (Postgres ONLY — see tests/relay_db.py).
+"""Relay Postgres models. Postgres ONLY.
 
-Tables (all shared state lives here so a second replica needs no
-redesign):
-
-- ``relay_messages``: durable outbox queue. ``message_id`` is UNIQUE —
-  that constraint IS the dedup (no in-memory sets). ``status`` is one of
-  ``pending`` / ``delivered`` / ``dlq`` / ``expired``.
-- ``agent_directory``: verified agent cards. ``handle`` is UNIQUE when
-  present — the constraint makes handle claims atomic.
-- ``agent_presence``: last heartbeat per agent (``replica_id`` records
-  which relay process saw it).
-- ``auth_challenges``: single-use 32-byte challenges (base64 PK).
-- ``rate_hits``: per-IP directory write attempts for rate limiting.
-- ``relay_invites``: single-use invite claims (token hash -> card).
-- ``invite_claim_attempts``: per-IP wrong-code attempts for cooldown.
+Fresh empty database is the only supported start: boot runs
+Base.metadata.create_all() then verifies every table below exists.
+No migration / old-schema compatibility lives here.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import (
-    Boolean,
-    DateTime,
-    Integer,
-    String,
-    Text,
-    func,
-)
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -44,22 +26,12 @@ class RelayMessage(Base):
     sender: Mapped[str] = mapped_column(Text, nullable=False)
     recipient: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     envelope: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", index=True
-    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    delivered_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_attempt_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DirectoryEntry(Base):
@@ -71,15 +43,8 @@ class DirectoryEntry(Base):
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     card: Mapped[dict] = mapped_column(JSONB, nullable=False)
     signature: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class Presence(Base):
@@ -88,18 +53,14 @@ class Presence(Base):
     agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
     replica_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_heartbeat: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    last_heartbeat: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Challenge(Base):
     __tablename__ = "auth_challenges"
 
     challenge: Mapped[str] = mapped_column(Text, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -109,9 +70,7 @@ class RateHit(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ip: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Invite(Base):
@@ -120,12 +79,8 @@ class Invite(Base):
     token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     card: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -135,9 +90,7 @@ class ClaimAttempt(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     ip: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 TABLE_NAMES = [

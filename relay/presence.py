@@ -1,10 +1,4 @@
-"""Agent presence heartbeats (Postgres backed).
-
-One row per agent (``agent_presence``): the relay process that last saw
-the agent (``replica_id``) plus ``last_heartbeat``. Rows survive socket
-disconnects, so a reconnecting agent stays visible; readers decide
-staleness from ``last_heartbeat``.
-"""
+"""Agent presence heartbeats. One row per agent; rows survive disconnect."""
 
 from __future__ import annotations
 
@@ -31,19 +25,8 @@ def _row_to_dict(row: Presence, *, stale: bool = False) -> dict[str, Any]:
     }
 
 
-async def heartbeat(
-    session: AsyncSession,
-    agent_id: str,
-    *,
-    replica_id: str = "",
-    display_name: str | None = None,
-) -> None:
-    """Upsert the agent's presence row (single statement, replica-safe)."""
-    values: dict[str, Any] = {
-        "agent_id": agent_id,
-        "replica_id": replica_id,
-        "last_heartbeat": func.now(),
-    }
+async def heartbeat(session: AsyncSession, agent_id: str, *, replica_id: str = "", display_name: str | None = None) -> None:
+    values: dict[str, Any] = {"agent_id": agent_id, "replica_id": replica_id, "last_heartbeat": func.now()}
     if display_name is not None:
         values["display_name"] = display_name
     stmt = pg_insert(Presence).values(**values)
@@ -52,50 +35,29 @@ async def heartbeat(
         set_={
             "replica_id": stmt.excluded.replica_id,
             "last_heartbeat": func.now(),
-            **(
-                {"display_name": stmt.excluded.display_name}
-                if display_name is not None
-                else {}
-            ),
+            **({"display_name": stmt.excluded.display_name} if display_name is not None else {}),
         },
     )
     await session.execute(stmt)
     await session.flush()
 
 
-async def get_presence(
-    session: AsyncSession, agent_id: str
-) -> dict[str, Any] | None:
-    """Presence dict for one agent; None when never seen."""
-    row = (
-        await session.execute(
-            select(Presence).where(Presence.agent_id == agent_id)
-        )
-    ).scalar_one_or_none()
+async def get_presence(session: AsyncSession, agent_id: str) -> dict[str, Any] | None:
+    row = (await session.execute(select(Presence).where(Presence.agent_id == agent_id))).scalar_one_or_none()
     if row is None:
         return None
     return _row_to_dict(row)
 
 
-async def list_presence(
-    session: AsyncSession, *, stale_after_seconds: float = 90.0
-) -> list[dict[str, Any]]:
-    """Every known agent; ``stale`` when the heartbeat is too old."""
-    rows = (
-        await session.execute(select(Presence).order_by(Presence.agent_id))
-    ).scalars().all()
+async def list_presence(session: AsyncSession, *, stale_after_seconds: float = 90.0) -> list[dict[str, Any]]:
+    rows = (await session.execute(select(Presence).order_by(Presence.agent_id))).scalars().all()
     now = datetime.now(timezone.utc)
     out = []
     for row in rows:
         last = row.last_heartbeat
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
-        out.append(
-            _row_to_dict(
-                row,
-                stale=(now - last).total_seconds() > stale_after_seconds,
-            )
-        )
+        out.append(_row_to_dict(row, stale=(now - last).total_seconds() > stale_after_seconds))
     return out
 
 
