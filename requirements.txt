@@ -1,24 +1,19 @@
-# Nexus relay (v0.3) — direct dependencies, pinned.
+# Nexus relay (v0.3) — PRODUCTION dependencies, pinned.
 #
-# Ported from nexus-v1: the relay is Postgres-backed (queue claims need
+# The relay is Postgres-backed (queue claims need
 # SELECT ... FOR UPDATE SKIP LOCKED, so there is no SQLite backend).
-# Every `==` matches a version installed in this repository's test
-# environment. Nothing new is pinned beyond what nexus-v1 pins
-# (cryptography); the other pins are carried over from the gateway's
-# previous requirements at their installed versions.
+# Test tooling lives in requirements-dev.txt and is NOT installed in
+# the Docker image.
 
 fastapi==0.115.0
 uvicorn[standard]==0.52.4
 pydantic==2.9.0
 httpx==0.28.1
 
-# Database & Migrations (Postgres only)
-sqlalchemy==2.0.35
+# Database (Postgres only; the [asyncio] extra pulls greenlet, which
+# sqlalchemy.ext.asyncio requires at import time)
+sqlalchemy[asyncio]==2.0.35
 asyncpg==0.31.0
-alembic==1.13.0
 
-# Cryptography (Ed25519 auth/envelope verification via app/identity)
+# Cryptography (Ed25519 auth/envelope verification via relay/crypto.py)
 cryptography==46.0.1
-
-# Testing
-pytest==9.1.1

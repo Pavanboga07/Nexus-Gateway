@@ -11,9 +11,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.0"
-      - key: GATEWAY_HOST
-        value: "0.0.0.0"
-      - key: GATEWAY_LOG_LEVEL
+      - key: RELAY_LOG_LEVEL
         value: "INFO"
+      - key: RELAY_METRICS_TOKEN
+        sync: false
       - key: RELAY_DATABASE_URL
         sync: false

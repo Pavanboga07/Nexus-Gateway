@@ -52,10 +52,28 @@ async def enqueue(session: AsyncSession, *, envelope: dict[str, Any], max_per_re
     await session.flush()
     if inserted is None:
         return "dedup_hit"
-    pending_ids = (await session.execute(select(RelayMessage.id).where(RelayMessage.recipient == recipient, RelayMessage.status == "pending").order_by(RelayMessage.created_at.asc(), RelayMessage.id.asc()))).scalars().all()
-    evict = pending_ids[: len(pending_ids) - max_per_recipient]
-    if evict:
-        await session.execute(update(RelayMessage).where(RelayMessage.id.in_(evict)).values(status="dlq"))
+    # Bound the per-recipient backlog without loading every pending id into
+    # Python: count first, then evict the oldest `excess` rows in one
+    # statement. The just-inserted row is the newest, so it is never evicted.
+    pending_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(RelayMessage)
+            .where(RelayMessage.recipient == recipient, RelayMessage.status == "pending")
+        )
+    ).scalar_one()
+    excess = pending_count - max_per_recipient
+    if excess > 0:
+        oldest_ids = (
+            select(RelayMessage.id)
+            .where(RelayMessage.recipient == recipient, RelayMessage.status == "pending")
+            .order_by(RelayMessage.created_at.asc(), RelayMessage.id.asc())
+            .limit(excess)
+            .scalar_subquery()
+        )
+        await session.execute(
+            update(RelayMessage).where(RelayMessage.id.in_(oldest_ids)).values(status="dlq")
+        )
         await session.flush()
     return "queued"
 

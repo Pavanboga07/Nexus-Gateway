@@ -1,4 +1,4 @@
-"""Test helpers for V2 relay suites (NOT a test module).
+"""Test helpers for the relay test suites (NOT a test module).
 
 Database decision (documented here per the task): the relay targets
 Postgres ONLY (SQLAlchemy async + asyncpg) because queue claims need
@@ -8,8 +8,8 @@ server read-only (a SEPARATE ``nexus_relay_test`` database is created;
 ``nexus``/``nexus_test``/``neondb`` data is never touched) and skip
 gracefully when the server is unavailable.
 
-All ``relay.*`` imports are lazy so collection never breaks before the
-implementation lands (TDD red phase).
+All ``relay.*`` imports are lazy so collection never breaks if an
+import fails midway through a refactor.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def new_agent():
     """Fresh Ed25519 agent: (private_key, public_b64, agent_id)."""
     import base64
 
-    from app.identity import crypto
+    from relay import crypto
 
     priv, pub = crypto.generate_keypair()
     raw = crypto.public_key_bytes(pub)
@@ -172,9 +172,80 @@ def make_envelope(
 
 
 def sign_envelope(priv, unsigned: dict) -> dict:
-    from relay.envelope import sign_envelope as _sign
+    """Test-only envelope signer (mirrors what Nexus clients do end-to-end).
 
-    return _sign(priv, unsigned)
+    The relay itself never signs envelopes — signature verification is
+    the recipient's job — so these helpers live in the test suite, not
+    in relay/envelope.py.
+    """
+    import base64
+
+    from relay import crypto
+    from relay.envelope import Envelope
+
+    env = Envelope.model_validate({**unsigned, "signature": None})
+    raw_sig = crypto.sign_bytes(priv, env.canonical_bytes())
+    return {
+        **env.unsigned_dict(),
+        "signature": base64.b64encode(raw_sig).decode("ascii"),
+    }
+
+
+def verify_envelope_signature(envelope: dict, public_key_b64: str) -> bool:
+    """Test-only signature check. Never raises; False on any fault."""
+    import base64
+
+    from relay import crypto
+    from relay.envelope import Envelope
+
+    try:
+        signature_b64 = envelope.get("signature")
+        if not signature_b64 or not public_key_b64:
+            return False
+        public_key = crypto.load_public_key(
+            base64.b64decode(public_key_b64.encode("ascii"), validate=True)
+        )
+        signature = base64.b64decode(
+            signature_b64.encode("ascii"), validate=True
+        )
+        env = Envelope.model_validate(
+            {k: v for k, v in envelope.items() if k != "signature"}
+        )
+        return crypto.verify_bytes(public_key, env.canonical_bytes(), signature)
+    except Exception:
+        return False
+
+
+def build_signed_error(
+    priv,
+    *,
+    sender: str,
+    recipient: str,
+    correlation_id: str,
+    code: str,
+    message: str,
+) -> dict:
+    """Test-only signed ``error`` envelope builder."""
+    import uuid
+
+    from relay.envelope import ERROR_TTL_SECONDS, utc_iso_in, utc_now_iso
+
+    now = utc_now_iso()
+    return sign_envelope(
+        priv,
+        {
+            "protocol": "nexus-a2a",
+            "version": "0.3",
+            "message_id": f"msg_{uuid.uuid4().hex}",
+            "correlation_id": correlation_id,
+            "sender": sender,
+            "recipient": recipient,
+            "timestamp": now,
+            "expires_at": utc_iso_in(ERROR_TTL_SECONDS),
+            "message_type": "error",
+            "payload": {"code": code, "message": message},
+        },
+    )
 
 
 def make_card(
