@@ -7,12 +7,12 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.identity import crypto
-from relay.envelope import TIMESTAMP_PATTERN, canonical_json_bytes, parse_iso
+from relay import crypto
+from relay.envelope import AGENT_ID_PATTERN, TIMESTAMP_PATTERN, canonical_json_bytes, parse_iso
 from relay.models import DirectoryEntry, RateHit
 
 CARD_TYPE = "agent-card"
@@ -30,7 +30,6 @@ REQUIRED_CARD_FIELDS = frozenset({
     "public_key", "endpoint", "capabilities", "supported_purposes",
     "issued_at", "expires_at", "signature",
 })
-AGENT_ID_PATTERN = re.compile(r"^nexus:ed25519:[0-9a-f]{32}$")
 
 
 class DirectoryError(ValueError):
@@ -108,13 +107,31 @@ def sign_card(private_key, card: dict[str, Any]) -> dict[str, Any]:
 
 
 async def check_rate_limit(session: AsyncSession, ip: str, *, limit: int, window_seconds: float = RATE_WINDOW_SECONDS) -> None:
+    """Atomically record this attempt and enforce the write rate limit.
+
+    The hit is INSERTed and counted in a single statement, so concurrent
+    bursts cannot slip through the check-then-insert race. Callers must
+    commit the session even when this raises: the rejected attempt still
+    burns budget, and the hit must be recorded BEFORE any validation
+    runs (in a separate transaction) so failed validations cannot roll
+    it back.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
     await session.execute(delete(RateHit).where(RateHit.created_at < cutoff))
-    count = (await session.execute(select(func.count()).where(RateHit.ip == ip))).scalar_one()
-    if count >= limit:
-        raise DirectoryError(429, "RATE_LIMITED", "directory write rate limit exceeded")
-    session.add(RateHit(ip=ip))
+    count = (
+        await session.execute(
+            text(
+                "WITH new_hit AS ("
+                " INSERT INTO rate_hits (ip) VALUES (:ip) RETURNING id"
+                ") SELECT count(*) FROM rate_hits"
+                " WHERE ip = :ip AND created_at >= :cutoff"
+            ),
+            {"ip": ip, "cutoff": cutoff},
+        )
+    ).scalar_one()
     await session.flush()
+    if count > limit:
+        raise DirectoryError(429, "RATE_LIMITED", "directory write rate limit exceeded")
 
 
 async def get_entry(session: AsyncSession, agent_id: str) -> dict[str, Any] | None:
@@ -156,3 +173,11 @@ async def list_entries(session: AsyncSession, *, limit: int = LIST_LIMIT_DEFAULT
     rows = (await session.execute(select(DirectoryEntry).order_by(DirectoryEntry.agent_id.asc()).limit(limit).offset(offset))).scalars().all()
     items = [{"agent_id": row.agent_id, "handle": row.handle, "display_name": row.display_name} for row in rows]
     return total, items
+
+
+async def purge_old_rate_hits(session: AsyncSession, *, older_than_seconds: float = 86400) -> int:
+    """Delete rate-limit hits older than the retention window. Returns rows removed."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=older_than_seconds)
+    result = await session.execute(delete(RateHit).where(RateHit.created_at < cutoff))
+    await session.flush()
+    return result.rowcount or 0

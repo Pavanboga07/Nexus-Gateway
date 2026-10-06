@@ -1,9 +1,9 @@
-"""Shared fixtures for the NEW repo test suite (V2 relay and beyond).
+"""Shared fixtures for the relay test suite.
 
-Additive only: existing V0/V1 tests are unaffected. Relay tests run
+Relay tests run
 against a SEPARATE local database (``nexus_relay_test``) on the reused
 ``nexus_postgres`` server (:5433) and skip gracefully when it is down,
-mirroring the old repo's conftest skip idiom. Never touches
+They skip gracefully when the database is down. Never touches
 nexus/nexus_test/neondb data.
 """
 

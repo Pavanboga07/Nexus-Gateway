@@ -1,4 +1,4 @@
-"""V2 relay directory tests (TDD red first, PG-gated).
+"""Relay directory tests (PG-gated).
 
 Authenticated writes (unsigned/forged cards -> 401 and never stored),
 atomic handle claims (conflict -> clean 409 reject), unconditional

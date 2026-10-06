@@ -1,4 +1,4 @@
-"""V2 relay socket tests (TDD red first, PG-gated).
+"""Relay socket tests (PG-gated).
 
 Two-client delivery over real WebSockets (starlette TestClient, no
 ports): handshake, live delivery + ack settle, kill-mid-flight
@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app.identity import crypto
+from relay import crypto
 from tests.relay_db import TEST_URL, make_envelope, new_agent, run
 
 

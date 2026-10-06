@@ -4,7 +4,10 @@ services:
     container_name: nexus_gateway_postgres
     environment:
       POSTGRES_USER: nexus_gateway
-      POSTGRES_PASSWORD: gateway_secret
+      # No default password is committed: compose fails loudly unless
+      # POSTGRES_PASSWORD is set in the environment (or a .env file).
+      # This value is dev-only — never reuse it for a real deployment.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your environment (dev-only value; see .env.example)}
       POSTGRES_DB: nexus_gateway
     ports:
       - "5434:5432"
@@ -23,10 +26,9 @@ services:
     ports:
       - "9000:9000"
     environment:
-      GATEWAY_HOST: "0.0.0.0"
-      GATEWAY_PORT: "9000"
-      GATEWAY_DATABASE_URL: "postgresql+asyncpg://nexus_gateway:gateway_secret@gateway_db:5432/nexus_gateway"
-      GATEWAY_LOG_LEVEL: "INFO"
+      PORT: "9000"
+      RELAY_DATABASE_URL: "postgresql+asyncpg://nexus_gateway:${POSTGRES_PASSWORD}@gateway_db:5432/nexus_gateway"
+      RELAY_LOG_LEVEL: "INFO"
     depends_on:
       gateway_db:
         condition: service_healthy

@@ -11,7 +11,7 @@ Types: ``request``, ``response``, ``approval_request``, ``approve``,
 one ask/approve/answer exchange across hops (Task V4 builds the loop on
 this key).
 
-Canonical bytes (carried-over proven rules, reimplemented fresh):
+Canonical bytes:
 
 - JSON with sorted keys, compact separators, ``ensure_ascii=False``,
   UTF-8 encoding;
@@ -24,10 +24,8 @@ Timestamps are strict UTC second-resolution ``YYYY-MM-DDTHH:MM:SSZ``.
 
 from __future__ import annotations
 
-import base64
 import json
 import re
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -208,83 +206,20 @@ class Envelope(BaseModel):
         return canonical_json_bytes(self.unsigned_dict())
 
 
-def sign_envelope(private_key, unsigned: dict[str, Any]) -> dict[str, Any]:
-    """Validate ``unsigned``, sign its canonical bytes, attach signature."""
-    from app.identity import crypto
-
-    env = Envelope.model_validate({**unsigned, "signature": None})
-    raw_sig = crypto.sign_bytes(private_key, env.canonical_bytes())
-    return {
-        **env.unsigned_dict(),
-        "signature": base64.b64encode(raw_sig).decode("ascii"),
-    }
-
-
-def verify_envelope_signature(
-    envelope: dict[str, Any], public_key_b64: str
-) -> bool:
-    """Verify an envelope's signature. Never raises; False on any fault."""
-    from app.identity import crypto
-
-    try:
-        signature_b64 = envelope.get("signature")
-        if not signature_b64 or not public_key_b64:
-            return False
-        public_key = crypto.load_public_key(
-            base64.b64decode(public_key_b64.encode("ascii"), validate=True)
-        )
-        signature = base64.b64decode(
-            signature_b64.encode("ascii"), validate=True
-        )
-        env = Envelope.model_validate(
-            {k: v for k, v in envelope.items() if k != "signature"}
-        )
-        return crypto.verify_bytes(public_key, env.canonical_bytes(), signature)
-    except Exception:
-        return False
-
-
-def build_signed_error(
-    private_key,
-    *,
-    sender: str,
-    recipient: str,
-    correlation_id: str,
-    code: str,
-    message: str,
-) -> dict[str, Any]:
-    """A signed ``error`` envelope (unknown types, policy denials, ...)."""
-    now = utc_now_iso()
-    return sign_envelope(
-        private_key,
-        {
-            "protocol": PROTOCOL,
-            "version": VERSION,
-            "message_id": f"msg_{uuid.uuid4().hex}",
-            "correlation_id": correlation_id,
-            "sender": sender,
-            "recipient": recipient,
-            "timestamp": now,
-            "expires_at": utc_iso_in(ERROR_TTL_SECONDS),
-            "message_type": "error",
-            "payload": {"code": code, "message": message},
-        },
-    )
-
-
 __all__ = [
+    "AGENT_ID_PATTERN",
     "ERROR_TTL_SECONDS",
+    "ID_PATTERN",
     "MESSAGE_TYPES",
     "PROTOCOL",
+    "TIMESTAMP_FORMAT",
+    "TIMESTAMP_PATTERN",
     "VERSION",
     "CanonicalizationError",
     "Envelope",
     "EnvelopeError",
-    "build_signed_error",
     "canonical_json_bytes",
     "parse_iso",
-    "sign_envelope",
     "utc_iso_in",
     "utc_now_iso",
-    "verify_envelope_signature",
 ]
