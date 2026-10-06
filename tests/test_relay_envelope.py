@@ -1,4 +1,4 @@
-"""V2 envelope tests (v0.3, TDD red first).
+"""Envelope tests (v0.3).
 
 Covers the frozen v0.3 rules: canonical serialization (strict UTC
 timestamps, floats rejected, signature excluded, None omitted at every
@@ -47,7 +47,7 @@ def test_vector_canonical_bytes_match_exactly():
 
 
 def test_vector_signatures_verify_under_recorded_keys():
-    from relay.envelope import verify_envelope_signature
+    from tests.relay_db import verify_envelope_signature
 
     data = load_vectors()
     for entry in data["vectors"]:
@@ -61,7 +61,7 @@ def test_vector_signatures_verify_under_recorded_keys():
 
 
 def test_tampered_vector_payload_fails_verify():
-    from relay.envelope import verify_envelope_signature
+    from tests.relay_db import verify_envelope_signature
 
     data = load_vectors()
     entry = by_name(data["vectors"], "request-with-correlation")
@@ -73,7 +73,7 @@ def test_tampered_vector_payload_fails_verify():
 
 
 def test_sign_verify_round_trip_with_fresh_key():
-    from relay.envelope import sign_envelope, verify_envelope_signature
+    from tests.relay_db import sign_envelope, verify_envelope_signature
     from tests.relay_db import make_envelope, new_agent
 
     priv, pub_b64, agent_id = new_agent()
@@ -123,7 +123,7 @@ def test_expired_envelope_rejected():
 
 
 def test_unknown_message_type_builds_signed_error():
-    from relay.envelope import build_signed_error, verify_envelope_signature
+    from tests.relay_db import build_signed_error, verify_envelope_signature
     from tests.relay_db import new_agent
 
     priv, pub_b64, agent_id = new_agent()

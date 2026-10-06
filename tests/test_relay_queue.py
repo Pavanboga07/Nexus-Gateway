@@ -1,4 +1,4 @@
-"""V2 relay queue tests (TDD red first, PG-gated).
+"""Relay queue tests (PG-gated).
 
 Offline persist, reconnect redelivery, ack settles, TTL expiry, DLQ
 after N attempts, UNIQUE(message_id) dedup (no memory sets), per-recipient

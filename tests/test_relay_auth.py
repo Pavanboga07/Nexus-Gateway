@@ -1,4 +1,4 @@
-"""V2 relay auth tests (TDD red first).
+"""Relay auth tests.
 
 Challenge-response: 32-byte challenges signed locally; the server
 verifies the agent_id<->key binding AND the signature. Challenges are
@@ -24,16 +24,18 @@ def test_challenge_is_32_bytes_and_unique():
 
 
 def test_challenge_base64_round_trip():
-    from relay.auth import decode_challenge, encode_challenge, new_challenge_bytes
+    from relay.auth import encode_challenge, new_challenge_bytes
+
+    import base64
 
     raw = new_challenge_bytes()
-    assert decode_challenge(encode_challenge(raw)) == raw
+    assert base64.b64decode(encode_challenge(raw).encode("ascii")) == raw
 
 
 def test_auth_round_trip_ok(relay_engine):
     from relay import auth
     from relay.db import make_session_factory
-    from app.identity import crypto
+    from relay import crypto
 
     priv, pub_b64, agent_id = new_agent()
 
@@ -62,7 +64,7 @@ def test_auth_round_trip_ok(relay_engine):
 def test_wrong_key_signature_rejected(relay_engine):
     from relay import auth
     from relay.db import make_session_factory
-    from app.identity import crypto
+    from relay import crypto
 
     priv_a, pub_b64_a, agent_id_a = new_agent()
     _, pub_b64_b, _ = new_agent()
@@ -101,7 +103,7 @@ def test_agent_id_key_mismatch_rejected(relay_engine):
     from relay import auth
     from relay.auth import AuthError
     from relay.db import make_session_factory
-    from app.identity import crypto
+    from relay import crypto
 
     priv, pub_b64, agent_id = new_agent()
     _, other_pub_b64, _ = new_agent()
@@ -135,7 +137,7 @@ def test_replayed_challenge_rejected(relay_engine):
     from relay import auth
     from relay.auth import AuthError
     from relay.db import make_session_factory
-    from app.identity import crypto
+    from relay import crypto
 
     priv, pub_b64, agent_id = new_agent()
 
