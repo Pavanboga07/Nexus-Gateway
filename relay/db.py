@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -18,14 +19,29 @@ logger = logging.getLogger("relay.db")
 
 
 def normalize_database_url(url: str) -> str:
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
-    url = url.replace("sslmode=require", "ssl=require")
-    parts = url.split("?", 1)
-    if len(parts) == 2:
-        kept = "&".join(p for p in parts[1].split("&") if not p.startswith("channel_binding="))
-        url = parts[0] + ("?" + kept if kept else "")
-    return url
+    """Normalize a Postgres URL for asyncpg, parsed properly.
+
+    - ``postgresql://`` -> ``postgresql+asyncpg://``
+    - ``sslmode=require`` query param -> ``ssl=require`` (asyncpg dialect)
+    - ``channel_binding`` query param is dropped (asyncpg rejects it)
+    - every other param is preserved verbatim and in order
+
+    Parsing with ``urllib.parse`` instead of string replacement means a
+    password that happens to contain ``sslmode=require`` is left alone.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("postgresql", "postgresql+asyncpg"):
+        return url  # not ours to normalize; pass through untouched
+    scheme = "postgresql+asyncpg" if parsed.scheme == "postgresql" else parsed.scheme
+    params: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key == "channel_binding":
+            continue
+        if key == "sslmode" and value == "require":
+            params.append(("ssl", "require"))
+        else:
+            params.append((key, value))
+    return urlunparse(parsed._replace(scheme=scheme, query=urlencode(params)))
 
 
 def resolve_database_url(explicit: str | None = None) -> str:
@@ -70,12 +86,6 @@ async def init_and_verify(engine: AsyncEngine) -> None:
     await verify_schema(engine)
 
 
-async def truncate_all(engine: AsyncEngine) -> None:
-    tables = ", ".join(f'"{name}"' for name in TABLE_NAMES)
-    async with engine.begin() as conn:
-        await conn.execute(text(f"TRUNCATE {tables}"))
-
-
 async def check_ready(engine: AsyncEngine) -> bool:
     try:
         async with engine.connect() as conn:
@@ -94,6 +104,5 @@ __all__ = [
     "make_session_factory",
     "resolve_database_url",
     "normalize_database_url",
-    "truncate_all",
     "verify_schema",
 ]

@@ -6,10 +6,10 @@ import base64
 import os
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.identity import crypto
+from relay import crypto
 from relay.models import Challenge
 
 CHALLENGE_BYTES = 32
@@ -28,16 +28,6 @@ def new_challenge_bytes() -> bytes:
 
 def encode_challenge(raw: bytes) -> str:
     return base64.b64encode(raw).decode("ascii")
-
-
-def decode_challenge(encoded: str) -> bytes:
-    try:
-        raw = base64.b64decode(encoded.encode("ascii"), validate=True)
-    except Exception as exc:
-        raise AuthError("INVALID_CHALLENGE", "challenge is not base64") from exc
-    if len(raw) != CHALLENGE_BYTES:
-        raise AuthError("INVALID_CHALLENGE", "challenge must be 32 bytes")
-    return raw
 
 
 async def mint_challenge(session: AsyncSession) -> str:
@@ -80,9 +70,20 @@ async def verify_and_consume(
         raise AuthError("IDENTITY_MISMATCH", "agent_id is not the key fingerprint")
     if not crypto.verify_bytes(public_key, challenge_raw, signature):
         raise AuthError("INVALID_SIGNATURE", "challenge signature invalid")
-    row.used = True
-    row.agent_id = agent_id
+    # Atomic consume: exactly one concurrent verifier can flip used=false
+    # to true. No row back means another connection won the race (or the
+    # row vanished) — treat it as a replay, never as success.
+    consumed = (
+        await session.execute(
+            update(Challenge)
+            .where(Challenge.challenge == challenge_b64, Challenge.used.is_(False))
+            .values(used=True, agent_id=agent_id)
+            .returning(Challenge.challenge)
+        )
+    ).scalar_one_or_none()
     await session.flush()
+    if consumed is None:
+        raise AuthError("REPLAY", "challenge already consumed")
     return agent_id
 
 
@@ -90,7 +91,6 @@ __all__ = [
     "CHALLENGE_BYTES",
     "CHALLENGE_TTL_SECONDS",
     "AuthError",
-    "decode_challenge",
     "encode_challenge",
     "mint_challenge",
     "new_challenge_bytes",
