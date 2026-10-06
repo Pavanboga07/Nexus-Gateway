@@ -6,17 +6,14 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install dependencies
+# Install production dependencies only (tests live in requirements-dev.txt)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY alembic.ini .
-COPY alembic/ ./alembic/
 COPY relay/ ./relay/
-COPY app/ ./app/
 COPY run.py .
 
-EXPOSE 8000
+EXPOSE 9000
 
 CMD ["python", "run.py"]
