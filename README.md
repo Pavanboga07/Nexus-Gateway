@@ -29,9 +29,9 @@ The Nexus Gateway solves this by maintaining long-lived outbound WebSocket conne
 ```
 
 ### Complete Service Independence
-- **Zero Nexus Code Imports**: The gateway contains no imports from `app.memory`, `app.policy`, `app.a2a`, `app.identity`, or any other Nexus modules.
-- **Dedicated Database**: Connects to its own database (`GATEWAY_DATABASE_URL`), completely isolated from any Nexus instance's database.
-- **Own Configuration**: Configured exclusively via `GATEWAY_*` environment variables.
+- **Zero Nexus Code Imports**: The gateway imports nothing from the Nexus application. The Ed25519 primitives it needs are vendored in `relay/crypto.py` and the invite-code validator in `relay/pairing.py` — no shared packages, no monorepo coupling.
+- **Dedicated Database**: Connects to its own database (`RELAY_DATABASE_URL`), completely isolated from any Nexus instance's database.
+- **Own Configuration**: Configured exclusively via `RELAY_*` environment variables (plus `PORT`).
 - **Independently Hostable**: Can be packaged, containerized, and deployed on any cloud VM or container service without Nexus.
 
 ---
@@ -57,7 +57,7 @@ The gateway operates under a **zero-trust / potentially compromised relay** mode
 
 ## 3. Wire Protocol Specification
 
-All frames exchanged over `WS /ws` are JSON documents with a discriminator field `"type"`.
+All frames exchanged over `WS /ws` are JSON documents with a discriminator field `"type"`. Every server-initiated frame carries a `correlation_id` so clients can correlate responses.
 
 ### 3.1 Authentication Handshake
 
@@ -70,8 +70,7 @@ Agent (Client)                                   Gateway (Server)
       │   {                                             │
       │     "type": "auth_challenge",                   │
       │     "challenge": "<base64 random 32 bytes>",    │
-      │     "protocol": "nexus-gw",                     │
-      │     "version": "0.1"                            │
+      │     "correlation_id": "corr_..."                │
       │   }                                             │
       │                                                 │
       ├────────────── auth_response ───────────────────►│
@@ -80,16 +79,23 @@ Agent (Client)                                   Gateway (Server)
       │     "agent_id": "nexus:ed25519:<32 hex>",       │
       │     "public_key": "<base64 raw 32 bytes>",      │
       │     "signature": "<base64 64-byte signature>",  │
-      │     "display_name": "My Agent"                  │
+      │     "display_name": "My Agent"  // optional     │
       │   }                                             │
       │                                                 │
       │◄───────────── auth_result ──────────────────────┤
       │   {                                             │
       │     "type": "auth_result",                      │
       │     "success": true,                            │
-      │     "agent_id": "nexus:ed25519:<32 hex>"        │
+      │     "agent_id": "nexus:ed25519:<32 hex>",       │
+      │     "correlation_id": "corr_..."                │
       │   }                                             │
 ```
+
+Rules:
+- The challenge is single-use and expires after 120s; the response must arrive within `RELAY_AUTH_TIMEOUT_SECONDS` (default 10s) or the socket is closed with code 4401 (slowloris guard).
+- `agent_id` must equal `nexus:ed25519:` + first 32 hex chars of `SHA-256(public_key)`; the signature must verify over the raw challenge bytes.
+- One session per agent: a new authenticated connection supersedes the old one, which receives `{"type": "error", "code": "SESSION_SUPERSEDED"}` and is closed (4401).
+- Failure: `{"type": "auth_result", "success": false, "code": "<INVALID_CHALLENGE|REPLAY|EXPIRED_CHALLENGE|IDENTITY_MISMATCH|INVALID_SIGNATURE>", "message": "...", "correlation_id": "corr_..."}` then close 4401.
 
 ### 3.2 Message Relaying
 
@@ -99,69 +105,94 @@ Agent (Client)                                   Gateway (Server)
   "type": "relay_envelope",
   "relay_id": "relay_f47ac10b58cc4372a5670e02b2c3d479",
   "recipient": "nexus:ed25519:7e45b412a874f67c3098d752e50529d3",
+  "correlation_id": "corr_9d2c...",
   "envelope": {
     "protocol": "nexus-a2a",
-    "version": "0.1",
+    "version": "0.3",
     "message_id": "msg_8b05615d18e84ef1867c9d2f6fa72e50",
-    "task_id": "task_2cf24dba5fb0a30e26e83b2ac5b9e29e",
+    "correlation_id": "corr_9d2c...",
     "sender": "nexus:ed25519:e43a6d7bf392110c765fa8901234abcd",
     "recipient": "nexus:ed25519:7e45b412a874f67c3098d752e50529d3",
     "timestamp": "2026-09-15T10:00:00Z",
     "expires_at": "2026-09-15T10:01:00Z",
     "message_type": "request",
-    "purpose": "availability_inquiry",
-    "payload": {
-      "action": "disclose_information",
-      "data_category": "availability"
-    },
+    "payload": { "action": "ping" },
     "signature": "..."
   }
 }
 ```
+
+Envelope rules (v0.3): `protocol` is `"nexus-a2a"`, `version` is `"0.3"`; `correlation_id` is REQUIRED; timestamps are strict UTC `YYYY-MM-DDTHH:MM:SSZ`; floats are rejected anywhere in the payload; `message_type` is one of `request`, `response`, `approval_request`, `approve`, `reject`, `error`. The gateway schema-validates the envelope and checks `envelope.sender` matches the authenticated connection, but **never verifies the envelope signature** — signatures are end-to-end between agents (see §2.3). Extra fields are rejected.
 
 #### Gateway Response to Sender
 ```json
 {
   "type": "delivery_ack",
   "relay_id": "relay_f47ac10b58cc4372a5670e02b2c3d479",
-  "status": "delivered" // or "queued", or "duplicate"
+  "status": "delivered",
+  "correlation_id": "corr_9d2c..."
 }
 ```
+`status` is `"delivered"` (recipient acked within the timeout), `"queued"` (recipient offline or ack timed out — the message stays queued for redelivery). `correlation_id` is always echoed. Note: `"queued"` means *accepted, subject to capacity* — when a recipient's backlog exceeds the per-recipient cap, the oldest messages are evicted to the DLQ (each eviction is logged with its message IDs).
 
 #### Delivery to Recipient (`delivery` from Gateway to Recipient)
 ```json
 {
   "type": "delivery",
-  "relay_id": "relay_f47ac10b58cc4372a5670e02b2c3d479",
-  "envelope": { ... }
+  "relay_id": "dlv_3f9a...",
+  "envelope": { "...v0.3 envelope..." },
+  "correlation_id": "corr_9d2c..."
 }
 ```
+The recipient acknowledges with `{"type": "delivery_ack", "relay_id": "dlv_3f9a..."}`. Unacked messages stay `pending` and are redelivered on the next reconnect (at-least-once). If the recipient is offline at send time, the message is queued and flushed on reconnect.
+
+#### Error frames
+```json
+{ "type": "error", "code": "INVALID_ENVELOPE", "message": "...", "correlation_id": "corr_..." }
+```
+Codes: `INVALID_ENVELOPE`, `SENDER_MISMATCH`, `UNAUTHENTICATED`, `UNKNOWN_FRAME`, `SESSION_SUPERSEDED`, `INTERNAL` (unexpected server-side failure handling a frame; the socket stays open).
 
 ### 3.3 Heartbeat & Presence
 
-- **Heartbeat**: Ping/Pong frame `{"type": "heartbeat", "timestamp": "2026-09-15T10:00:00Z"}`.
-- **Presence Query**: `{"type": "presence_query", "agent_id": "..."}`.
-- **Presence Result**: `{"type": "presence_result", "agent_id": "...", "online": true, "last_seen": "..."}`.
+- **Heartbeat**: client sends `{"type": "heartbeat"}` → server replies `{"type": "heartbeat_ack"}` and records presence.
+- **Presence query (REST)**: `GET /presence/{agent_id}` → `{"agent_id", "replica_id", "display_name", "last_heartbeat", "stale"}` or `404`. `stale` is `true` when the last heartbeat is older than `RELAY_PRESENCE_STALE_SECONDS` (default 120s).
+
+### 3.4 REST Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Liveness probe |
+| `GET` | `/readyz` | Readiness probe (DB reachable) |
+| `GET` | `/metrics` | Connections, queue depth, deliveries, drops, auth failures, last cleanup stats. Bearer-token gated when `RELAY_METRICS_TOKEN` is set |
+| `GET` | `/presence/{agent_id}` | Last heartbeat for an agent |
+| `PUT` | `/directory/{agent_id}` | Publish a signed agent card (rate-limited, `{"card": {...}}`) |
+| `GET` | `/directory/{agent_id}` | Fetch one card |
+| `GET` | `/directory` | Paginated card listing (`?limit=&offset=`) |
+| `POST` | `/invites` | Publish an invite (`{"card", "code", "ttl_seconds"}`; TTL clamped to `RELAY_MAX_INVITE_TTL_SECONDS`, minimum 1) |
+| `POST` | `/invites/claim` | Claim an invite with a code (`{"code"}`; wrong codes count toward a per-IP cooldown) |
+| `GET` | `/dlq` | Inspect the dead-letter queue (`?recipient=`, paginated) |
+| `POST` | `/dlq/redrive` | Move DLQ messages back to pending (`{"recipient"}` and/or `{"message_ids"}`; attempts reset) |
 
 ---
 
 ## 4. Configuration Reference
 
-All settings can be configured via environment variables or a `.env` file:
+Every variable the relay reads. Anything not listed here is not read — if you set it, nothing happens.
 
 | Variable | Default | Description |
 |---|---|---|
-| `GATEWAY_HOST` | `0.0.0.0` | Bind IP address |
-| `GATEWAY_PORT` | `9000` | Gateway HTTP and WebSocket port |
-| `GATEWAY_DATABASE_URL` | `postgresql+asyncpg://nexus:nexus@localhost:5433/nexus_gateway` | Database connection string |
-| `GATEWAY_AUTH_TIMEOUT_SECONDS` | `10.0` | Maximum time allowed to complete auth handshake |
-| `GATEWAY_MAX_MESSAGE_SIZE` | `65536` | Maximum message size in bytes (64 KB) |
-| `GATEWAY_MESSAGE_TTL_SECONDS` | `86400` | Offline queue message expiration (24h) |
-| `GATEWAY_MAX_QUEUE_PER_AGENT` | `1000` | Max queued messages per offline agent |
-| `GATEWAY_MAX_CONNECTIONS` | `500` | Maximum concurrent WebSocket connections |
-| `GATEWAY_HEARTBEAT_INTERVAL_SECONDS`| `30.0` | Periodic keepalive interval |
-| `GATEWAY_QUEUE_CLEANUP_INTERVAL_SECONDS` | `300.0` | Interval for purging expired queue records |
-| `GATEWAY_LOG_LEVEL` | `INFO` | Logging verbosity |
+| `RELAY_DATABASE_URL` | *(required)* | Async Postgres URL, e.g. `postgresql+asyncpg://user:pass@host:5432/db`. The relay refuses to boot without it |
+| `PORT` | `9000` | HTTP + WebSocket listen port (Render sets this) |
+| `RELAY_LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `RELAY_AUTH_TIMEOUT_SECONDS` | `10` | Max seconds to complete the auth handshake before the socket is closed |
+| `RELAY_MAX_WS_MESSAGE_BYTES` | `65536` | Max WebSocket message size in bytes |
+| `RELAY_MAX_INVITE_TTL_SECONDS` | `86400` | Cap for `POST /invites` `ttl_seconds` (prevents immortal invites) |
+| `RELAY_CLEANUP_INTERVAL_SECONDS` | `300` | Retention sweeper interval in seconds (`0` disables) |
+| `RELAY_DELIVERED_RETENTION_DAYS` | `7` | Delivered/expired messages older than this are purged |
+| `RELAY_PRESENCE_STALE_SECONDS` | `120` | Seconds after the last heartbeat before `GET /presence/{agent_id}` reports the agent as `stale` |
+| `RELAY_METRICS_TOKEN` | *(unset)* | Bearer token gating `/metrics`. **Set this** — when unset, `/metrics` is unauthenticated and the relay logs a warning at boot |
+| `RELAY_SELF_PING_URL` | *(unset)* | Free-tier keep-alive target, e.g. `https://your-service.onrender.com` |
+| `RELAY_SELF_PING_INTERVAL` | `0` | Keep-alive interval in seconds; the loop is OFF unless both this and the URL are set |
 
 ---
 
@@ -170,6 +201,8 @@ All settings can be configured via environment variables or a `.env` file:
 ### Running with Docker Compose (Recommended)
 
 ```bash
+# POSTGRES_PASSWORD is required (no default is committed); a .env file works too.
+export POSTGRES_PASSWORD="a-long-dev-only-password"
 docker compose up -d
 ```
 
@@ -188,15 +221,13 @@ This starts:
    ```bash
    pip install -r requirements.txt
    ```
-3. Set your environment variables in `.env` (or copy `.env.example`).
-4. Run migrations:
-   ```bash
-   alembic upgrade head
-   ```
-5. Start the gateway:
+3. Set your environment variables in `.env` (or copy `.env.example`). `RELAY_DATABASE_URL` is required.
+4. Start the gateway:
    ```bash
    python run.py
    ```
+
+No migrations to run: on boot the relay creates the schema on a fresh database with `Base.metadata.create_all()` and then **verifies** every expected table exists, crashing loudly if any is missing.
 
 ---
 
